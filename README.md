@@ -2,7 +2,7 @@
 
 API REST PHP 8 de la « Tour de contrôle NavUp », l'outil interne de pilotage de NavUp Academy (prospects, clients, ventes, paiements, rendez-vous, appels, tâches, statistiques). Front Angular 21 : `~/Documents/_DEV/navup-front`.
 
-Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre l'étape 1 (socle et authentification). L'appli des parents est un projet séparé (`navup-parent-api`).
+Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre les étapes 1 (socle et authentification) et 2 (prospects, clients, fiche 360°). L'appli des parents est un projet séparé (`navup-parent-api`).
 
 Même style maison que `manicarton-api` : pas de framework, pas de composer, un dossier par ressource (`v1/<ressource>/index.php`), classes partagées dans `include/`. Les règles de code sont dans `CLAUDE.md`.
 
@@ -26,6 +26,7 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p < sql/000_create_database.sql
    mariadb -unavup -p navup < sql/001_users.sql
    mariadb -unavup -p navup < sql/002_login_ip.sql
+   mariadb -unavup -p navup < sql/010_dossiers.sql
    ```
 
 4. Créer le premier administrateur. Sans `--password`, un mot de passe conforme est généré et affiché une seule fois :
@@ -78,6 +79,40 @@ Une erreur métier sur un utilisateur connecté répond toujours 400, jamais 401
 
 Règles conservées sur les comptes : un seul profil par utilisateur, toujours au moins un administrateur actif, on ne désactive pas son propre compte.
 
+## Endpoints de l'étape 2 : dossiers
+
+Un dossier est un contact, prospect ou client selon son statut. Le droit se lit sur le groupe du dossier : module `prospects` pour les statuts `prospect`, `rdv_demande`, `rdv_planifie`, `a_relancer` ; module `clients` pour `client`, `client_actif`, `programme_termine`, `annule_rembourse`. « Lecture » et « complet » renvoient à la matrice des droits.
+
+| Méthode et chemin | Rôle | Accès |
+|---|---|---|
+| `GET v1/contacts/` `?groupe=prospects\|clients&q=&statut=a,b&origine=&du=&au=&action=retard\|prevue&categorie=&archive=1&sort=&dir=&page=&limit=` | liste filtrée, triée, paginée (`sort` : `nom`, `creation`, `premier_contact`, `action`, `statut`) | lecture du groupe ; `categorie` exige `famille` |
+| `GET v1/contacts/` `?id=` | identité et suivi d'un dossier, dernier événement lisible | lecture du groupe du dossier |
+| `POST v1/contacts/` | créer un dossier ; renvoie `doublons` (autres dossiers au même téléphone) | complet |
+| `PUT v1/contacts/` `{id_contact, …}` | modifier l'identité et le suivi (pas le statut) | complet |
+| `PUT v1/contacts/statut/` `{id_contact, statut}` | changer le statut | complet sur le groupe de départ et d'arrivée |
+| `PUT v1/contacts/archive/` `{id_contact, archive}` | classer sans suite (1) ou rouvrir (0) | complet |
+| `GET v1/contacts/chronologie/` `?id=&page=&limit=` | faits datés du dossier, limités aux modules lisibles | lecture |
+| `GET v1/contacts/famille/` `?id=` | déclarations, enfants, problématiques (avec leurs notes d'évolution), notes internes | `famille` |
+| `PUT v1/contacts/famille/` `{id_contact, …}` | saisir ou corriger ce que le parent a déclaré | `famille` complet |
+| `POST`, `PUT`, `DELETE v1/contacts/enfants/` | enfants concernés | `famille` complet |
+| `POST`, `PUT v1/contacts/problematiques/` | problématiques | `famille` complet |
+| `POST`, `DELETE v1/contacts/notes/` | notes internes ; avec `id_problematique`, note d'évolution. Suppression par l'auteur ou un admin | `famille` complet |
+| `GET v1/recherche/` `?q=` | recherche globale : nom, prénom, e-mail, téléphone, identifiant `NU-00012` ; 10 dossiers au plus | lecture de `prospects` ou `clients` |
+| `GET v1/listes/` | origines et catégories de problématiques actives | connecté |
+
+Les écritures sur la famille renvoient le bloc familial complet et à jour.
+
+Règles tenues par l'API :
+
+- **Création** : le nom, plus un e-mail ou un téléphone. L'e-mail est unique (400 sinon) ; un téléphone déjà connu est signalé dans `doublons` sans bloquer.
+- **Téléphone** : enregistré au format international. Un numéro français en `0…` devient `+33…` ; un numéro d'outre-mer ou étranger se saisit avec son indicatif.
+- **Identifiant client** : `NU-` suivi du numéro de dossier sur cinq chiffres ; déduit, jamais stocké.
+- **Texte libre** : lié tel quel (aucun `strip_tags`), borné en longueur, échappé à l'affichage par le front.
+- **Données familiales** : `d_contact` n'en contient aucune ; la liste et la recherche ne lisent que cette table. Le filtre par catégorie de problématique répond 403 sans le droit `famille`. Le texte de la prochaine action n'est servi qu'avec ce droit ; sa date reste visible.
+- **Statut** : écrit uniquement par `Contact::changerStatut()`, daté dans la chronologie.
+- **Journal d'audit et chronologie** : noms de champs, identifiants et codes seulement, jamais une valeur saisie. Le texte d'une note ou d'une déclaration n'existe qu'à un seul endroit en base ; la chronologie le joint à la lecture.
+- **Historique des textes** : une description ou un objectif corrigé remplace l'ancien texte ; la fiche indique qui a modifié et quand. L'historique demandé par le cahier des charges (§7) porte sur les statuts, les priorités et les notes d'évolution.
+
 ## Profils et droits
 
 Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes) : le profil `gestion` n'y accède jamais.
@@ -109,6 +144,8 @@ done
 
 Après un test de limitation par IP, vider le compteur : `DELETE FROM u_login_ip;`.
 
+Les parcours automatisés du front (`navup-front/outils/`) créent des comptes dont l'identifiant commence par `essai.` et des dossiers dont l'e-mail est en `essai.…@navup.local`. `php script-cgi/purge-essais.php` les efface avec leurs sessions, leurs données familiales et leurs lignes d'audit, ainsi que les traces du navigateur sans tête. `php script-cgi/vieillir-essais.php` étale dans le passé les événements des dossiers d'essai, pour que les captures du front montrent un fil sur plusieurs jours. Les deux scripts refusent de s'exécuter quand `$_PROD = 1`.
+
 ## Sécurité : ce qui diffère de ManiCarton
 
 Le cahier des charges (§22) interdit les secrets dans le code et demande de limiter strictement l'accès aux données familiales.
@@ -119,8 +156,10 @@ Le cahier des charges (§22) interdit les secrets dans le code et demande de lim
 - `Header::cors()` n'accepte que `localhost` en développement et les hôtes de `$_CORS_ORIGINES` en production ; aucun jeton de contournement, aucune adresse IP en dur.
 - `.htaccess` bloque aussi `.git` et les fichiers cachés.
 - `u_audit` enregistre l'objet visé par chaque action (`cible_type`, `cible_id`).
+- Les données familiales ont leurs propres tables et leur propre module de droits (`famille`) ; aucune valeur de dossier n'entre dans le journal d'audit.
 
 ## Mise en production
 
 - `require/secret.php` : `$_PROD = 1`, l'hôte du front dans `$_CORS_ORIGINES`, l'utilisateur MariaDB aux droits réduits.
 - HTTPS obligatoire. La double authentification est prévue avant l'ouverture aux données réelles (étape 8 de la feuille de route).
+- Journal d'accès d'Apache : la recherche envoie le terme saisi (un nom, un téléphone) dans l'URL de l'API. Utiliser un format de journal sans la chaîne de requête, par exemple `LogFormat "%h %l %u %t \"%m %U %H\" %>s %b" navup` puis `CustomLog … navup` dans l'hôte virtuel de l'API (`%U` est le chemin seul, `%r` contiendrait les paramètres).
