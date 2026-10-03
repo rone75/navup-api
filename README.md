@@ -2,7 +2,7 @@
 
 API REST PHP 8 de la « Tour de contrôle NavUp », l'outil interne de pilotage de NavUp Academy (prospects, clients, ventes, paiements, rendez-vous, appels, tâches, statistiques). Front Angular 21 : `~/Documents/_DEV/navup-front`.
 
-Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre les étapes 1 (socle et authentification) et 2 (prospects, clients, fiche 360°). L'appli des parents est un projet séparé (`navup-parent-api`).
+Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre les étapes 1 (socle et authentification), 2 (prospects, clients, fiche 360°) et 3 (ventes, paiements, échéancier). L'appli des parents est un projet séparé (`navup-parent-api`).
 
 Même style maison que `manicarton-api` : pas de framework, pas de composer, un dossier par ressource (`v1/<ressource>/index.php`), classes partagées dans `include/`. Les règles de code sont dans `CLAUDE.md`.
 
@@ -27,6 +27,7 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < sql/001_users.sql
    mariadb -unavup -p navup < sql/002_login_ip.sql
    mariadb -unavup -p navup < sql/010_dossiers.sql
+   mariadb -unavup -p navup < sql/020_ventes.sql
    ```
 
 4. Créer le premier administrateur. Sans `--password`, un mot de passe conforme est généré et affiché une seule fois :
@@ -113,6 +114,42 @@ Règles tenues par l'API :
 - **Journal d'audit et chronologie** : noms de champs, identifiants et codes seulement, jamais une valeur saisie. Le texte d'une note ou d'une déclaration n'existe qu'à un seul endroit en base ; la chronologie le joint à la lecture.
 - **Historique des textes** : une description ou un objectif corrigé remplace l'ancien texte ; la fiche indique qui a modifié et quand. L'historique demandé par le cahier des charges (§7) porte sur les statuts, les priorités et les notes d'évolution.
 
+## Endpoints de l'étape 3 : ventes et paiements
+
+Tout se saisit à la main ; Stripe (étape 6) écrira dans les mêmes tables. **Les montants sont des centimes entiers**, toujours positifs : le sens vient de la nature de l'écriture.
+
+| Méthode et chemin | Rôle | Accès |
+|---|---|---|
+| `GET v1/ventes/` `?q=&statut=a,b&en_cours=1&retard=1&modalite=&moyen=&origine=&du=&au=&sort=date\|montant\|nom\|reste&dir=&page=&limit=` | liste, avec `totaux` (vendu, encaissé, remboursé, reste dû) sur toute la sélection | `ventes` lecture |
+| `GET v1/ventes/` `?id=` | une vente : échéancier, écritures, historique, identité du dossier | `ventes` lecture ; écritures avec `paiements` lecture |
+| `GET v1/ventes/` `?id_contact=` | ventes d'un dossier (bloc de la fiche 360°) | `ventes` lecture |
+| `POST v1/ventes/` `{id_contact, code_offre, date_vente, remise?, motif_remise?, code_moyen?, commentaire?, echeances:[{date_prevue, montant}], encaissement?:{date_paiement, code_moyen, reference?}, cle_saisie?}` | enregistrer une vente (1 à 4 échéances) ; `encaissement` règle tout de suite la première | `ventes` complet (et `paiements` complet pour l'encaissement) |
+| `PUT v1/ventes/` `{id_vente, date_vente?, code_moyen?, commentaire?}` | corriger les champs descriptifs | `ventes` complet |
+| `PUT v1/ventes/echeancier/` `{id_vente, echeances:[…], remise?, motif_remise?}` | remplacer les échéances non soldées, accorder une remise | `ventes` complet |
+| `PUT v1/ventes/annulation/` `{id_vente, motif, remboursement?:{montant, date_paiement, code_moyen, reference?}}` | annuler une vente | `ventes` complet |
+| `GET v1/paiements/` `?type=a,b&moyen=&du=&au=&q=&id_vente=&annulees=1&sort=&dir=&page=&limit=` | journal des écritures, avec `totaux` (encaissé, remboursé, frais, net) | `paiements` lecture |
+| `GET v1/paiements/echeances/` `?etat=a_encaisser\|retard\|a_venir\|soldees&du=&au=&q=&…` | échéances des ventes en cours, avec `totaux` (à encaisser, dont en retard) | `paiements` lecture |
+| `POST v1/paiements/` `{id_vente, type, montant, date_paiement, code_moyen?, reference?, frais?, motif?, commentaire?, id_paiement_origine?, cle_saisie?}` | encaissement, échec, impayé ou remboursement | `paiements` complet |
+| `PUT v1/paiements/` `{id_paiement, code_moyen?, reference?, frais?, commentaire?}` | corriger une écriture (jamais son montant, sa date ni sa nature) | `paiements` complet |
+| `PUT v1/paiements/annulation/` `{id_paiement, motif}` | annuler une écriture saisie par erreur | `paiements` complet |
+
+Chaque écriture renvoie `{ventes, contact, avertissements}` : les ventes du dossier à jour et le dossier, dont le statut a pu changer. `v1/listes/` sert aussi les offres (prix en centimes) et les moyens de paiement. Ces endpoints ne lisent de `d_contact` que l'identité.
+
+Règles tenues par l'API :
+
+- **Total** : prix de l'offre, lu dans `p_offre` (jamais dans la requête), moins la remise. La somme des échéances actives est toujours égale au total.
+- **Grand livre** : `v_paiement` est la seule source des sommes. Une écriture ne se supprime jamais : une erreur de saisie s'annule (elle reste lisible, hors des sommes) ; un fait réel s'ajoute (`impaye` pour un chèque rejeté, `remboursement`).
+- **Répartition** : les encaissements soldent les échéances dans l'ordre des rangs. `id_echeance` sur une écriture est indicatif.
+- **Statut d'une vente** : calculé, jamais saisi. Première condition vraie : annulée et remboursée en totalité (`rembourse`) ; annulée avec remboursement partiel (`rembourse_partiellement`) ; annulée (`annule`) ; remboursement partiel ; encaissé au moins égal au total (`paye`) ; encaissé non nul (`paye_partiellement`) ; dernière tentative échouée et rien d'encaissé (`echoue`) ; sinon `en_attente`.
+- **État d'une échéance** : calculé à la lecture, car le retard dépend du jour (`annulee`, `payee`, `echouee`, `en_retard`, `payee_partiellement`, `a_venir`).
+- **Refus** : trop-perçu, remboursement au-delà de l'encaissé, date de paiement future ou antérieure à la vente, seconde vente en cours sur un dossier, vente sur un dossier classé sans suite.
+- **Indicateurs** : vendu = total des ventes non annulées plus l'encaissé des ventes annulées ; pour toute sélection, vendu = encaissé + reste dû. Net = encaissé moins frais (CDC §10). Les totaux se calculent avec les mêmes conditions que les lignes, sur toute la sélection.
+- **Automatismes du dossier** (même transaction) : « Client » quand l'encaissé d'une vente passe de zéro à plus de zéro ; « Annulé / remboursé » quand la vente d'un client est annulée ou remboursée en totalité, sans autre vente. Une écriture annulée pour erreur de saisie défait le changement qu'elle avait provoqué si rien n'a bougé depuis ; sinon l'API renvoie un avertissement. Ils s'appliquent quel que soit le droit de l'auteur sur les dossiers.
+- **Double envoi** : `cle_saisie` (UUID du formulaire) rend un envoi répété sans effet (200, rien n'est écrit). Chaque écriture verrouille le dossier (`SELECT … FOR UPDATE`).
+- **Historique** : les valeurs avant / après des changements financiers sont dans `v_historique` ; le journal d'audit et la chronologie ne portent que des identifiants et des codes. Les montants affichés dans la chronologie sont lus dans l'écriture au moment de l'affichage.
+
+`php script-cgi/verifier-finances.php` (lecture seule, utilisable en production) recalcule chaque vente depuis ses écritures et sort avec le code 1 au premier écart.
+
 ## Profils et droits
 
 Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes) : le profil `gestion` n'y accède jamais.
@@ -144,7 +181,7 @@ done
 
 Après un test de limitation par IP, vider le compteur : `DELETE FROM u_login_ip;`.
 
-Les parcours automatisés du front (`navup-front/outils/`) créent des comptes dont l'identifiant commence par `essai.` et des dossiers dont l'e-mail est en `essai.…@navup.local`. `php script-cgi/purge-essais.php` les efface avec leurs sessions, leurs données familiales et leurs lignes d'audit, ainsi que les traces du navigateur sans tête. `php script-cgi/vieillir-essais.php` étale dans le passé les événements des dossiers d'essai, pour que les captures du front montrent un fil sur plusieurs jours. Les deux scripts refusent de s'exécuter quand `$_PROD = 1`.
+Les parcours automatisés du front (`navup-front/outils/`) créent des comptes dont l'identifiant commence par `essai.` et des dossiers dont l'e-mail est en `essai.…@navup.local`. `php script-cgi/purge-essais.php` les efface avec leurs sessions, leurs données familiales, leurs ventes et leurs lignes d'audit, ainsi que les traces du navigateur sans tête. `php script-cgi/vieillir-essais.php` étale dans le passé les événements des dossiers d'essai, pour que les captures du front montrent un fil sur plusieurs jours. Les deux scripts refusent de s'exécuter quand `$_PROD = 1`.
 
 ## Sécurité : ce qui diffère de ManiCarton
 

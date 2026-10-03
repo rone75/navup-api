@@ -70,6 +70,23 @@ foreach ($dossiers as $d) {
         $nb++;
     }
 
+    // Un fait financier se lit à sa date de valeur : l'événement d'un paiement suit la date du paiement,
+    // celui de l'enregistrement d'une vente la date de la vente (l'heure étalée ci-dessus est conservée).
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN v_paiement p ON e.objet_type = 'paiement' AND p.id_paiement = e.objet_id
+         SET e.date_evenement = TIMESTAMP(p.date_paiement, TIME(e.date_evenement))
+         WHERE e.id_contact = ? AND JSON_VALUE(e.details, '$.action') <> 'annulation'",
+        array($idc),
+        'i'
+    );
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN v_vente v ON e.objet_type = 'vente' AND v.id_vente = e.objet_id
+         SET e.date_evenement = TIMESTAMP(v.date_vente, TIME(e.date_evenement))
+         WHERE e.id_contact = ? AND JSON_VALUE(e.details, '$.action') = 'creation'",
+        array($idc),
+        'i'
+    );
+
     $Mysql->execute(
         "UPDATE d_contact SET date_creation = (SELECT MIN(date_evenement) FROM d_evenement WHERE id_contact = ?) WHERE id_contact = ?",
         array($idc, $idc),

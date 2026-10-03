@@ -23,7 +23,8 @@ $file_err = getcwd() . "/index.php";
 date_default_timezone_set('Europe/Paris');
 
 // Listes de référence (CDC §6, §7, §21) ################################
-// GET : origines des contacts et catégories de problématiques actives. Le réglage de ces listes arrive à l'étape 7.
+// GET : origines des contacts, catégories de problématiques, offres (prix en centimes) et moyens de paiement actifs.
+// Le réglage de ces listes arrive à l'étape 7.
 
 if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
@@ -32,6 +33,10 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     $Response->success(array(
         'origines' => $Mysql->fetchAll("SELECT code, libelle FROM p_origine WHERE actif = 1 ORDER BY ordre, libelle"),
         'categories' => $Mysql->fetchAll("SELECT code, libelle FROM p_categorie_problematique WHERE actif = 1 ORDER BY ordre, libelle"),
+        'offres' => array_map(function ($o) {
+            return array('code' => $o->code, 'libelle' => $o->libelle, 'prix' => (int) $o->prix);
+        }, $Mysql->fetchAll("SELECT code, libelle, prix FROM p_offre WHERE actif = 1 ORDER BY ordre, libelle")),
+        'moyens' => $Mysql->fetchAll("SELECT code, libelle FROM p_moyen_paiement WHERE actif = 1 ORDER BY ordre, libelle"),
     ));
 }
 

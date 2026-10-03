@@ -6,7 +6,7 @@ Architecture de référence : `/var/www/manicarton-api` (même style maison). L'
 
 ## Feuille de route
 
-Livraison par étapes, un plan par étape : 1 socle et authentification (fait), 2 prospects, clients et fiche 360° (fait), 3 ventes, paiements et échéancier, 4 rendez-vous, appels et tâches, 5 tableau de bord, 6 connexions (formulaire public, Stripe, comptes NavUp Academy, e-mails, calendrier), 7 pilotage (statistiques, alertes, automatisations, exports), 8 sécurité et mise en production (MFA, RGPD, sauvegardes).
+Livraison par étapes, un plan par étape : 1 socle et authentification (fait), 2 prospects, clients et fiche 360° (fait), 3 ventes, paiements et échéancier (fait), 4 rendez-vous, appels et tâches, 5 tableau de bord, 6 connexions (formulaire public, Stripe, comptes NavUp Academy, e-mails, calendrier), 7 pilotage (statistiques, alertes, automatisations, exports), 8 sécurité et mise en production (MFA, RGPD, sauvegardes).
 
 ## Architecture
 
@@ -63,6 +63,7 @@ Corps JSON : `$R = json_decode(file_get_contents("php://input"));`. Toujours vé
 - `ControleData` (`package.data.php`) — `clean_text($str, array('API'))` pour toute valeur texte courte, `array('EMAIL')`, `gen_token()`.
 - `Saisie` (`package.saisie.php`) — lecture d'un corps JSON d'après une spécification : `lireChamps($R, $specs, $partiel)` (types `str`, `text`, `int`, `bool`, `enum`, `email`, `tel`, `date`, `fk` ; longueur maximale obligatoire, valeur vide rendue `null`, 400 au premier champ invalide), `verifierUnique()`, `pagination()`, `tri($autorises, $defaut, $departage)`, `inserer()`, `mettreAJour()`, `differences($actuel, &$data)` (noms des champs modifiés, jamais leurs valeurs). Les types `str` et `text` ne passent pas par `strip_tags`.
 - `Contact` (`package.contact.php`) — dossiers : `Contact::STATUTS`, `Contact::GROUPES`, `groupeDe()`, `reference()`, `exigerDossier($id, $niveau)` et `exigerFamille($id, $niveau)` (le droit dépend du statut du dossier : ils chargent la ligne puis vérifient), `sortie()`, spécifications de saisie (`specContact()`, `specDeclaration()`, `specEnfant()`, `specProblematique()`), `conditionRecherche($q)`, `tracer()` (audit et chronologie), `changerStatut()`, `famille($id)`, `chronologie()`. Un endpoint de dossier inclut `package.saisie.php` et `package.contact.php` après `package.user.php`, et instancie `$S` puis `$Contact`.
+- `Vente` (`package.vente.php`) — ventes et paiements : `exigerVente($id, $module, $niveau)`, `sortie()`, `echeances()`, `paiements()`, `historique()`, `blocDossier()`, filtres des listes (`conditionDossiersLisibles()`, `conditionRecherche()`, fragments `SQL_SOMMES`, `SQL_VENDU`, `SQL_RESTE`, `SQL_EN_COURS`), `calculer()` (statut et échéances d'après le grand livre, sans rien écrire), `recalculer()` (seul point d'écriture des caches), et les écritures : `creer()`, `ecrire()`, `annulerEcriture()`, `corrigerEcriture()`, `modifier()`, `reviserEcheancier()`, `annuler()`. Elles prennent l'auteur et l'origine : le webhook Stripe (étape 6) appellera les mêmes méthodes. Un endpoint financier inclut aussi `package.vente.php` et instancie `$Vente`.
 
 ## Règles
 
@@ -70,10 +71,14 @@ Corps JSON : `$R = json_decode(file_get_contents("php://input"));`. Toujours vé
 - **Texte libre** (notes, comptes rendus, objectifs du parent) : ne pas passer par `clean_text('API')`, qui applique `strip_tags` et supprime tout ce qui ressemble à une balise (« enfant <10 ans, note >5 » devient « enfant 5 »). Contrôler la longueur, lier la valeur telle quelle, et laisser l'échappement à l'affichage.
 - Ne jamais nettoyer ni tronquer un mot de passe ; hachage `password_hash(PASSWORD_BCRYPT)` / `password_verify` uniquement.
 - Compatibilité PHP 8.2+ : pas de syntaxe 8.4+.
-- Tables préfixées par domaine : `u_` utilisateurs, sessions, audit ; `d_` dossiers (contact, déclaration, enfant, problématique, note, événement) ; `p_` listes de référence. Les préfixes des autres domaines se fixent à l'étape qui les crée. InnoDB, `utf8mb4_unicode_ci`, clés étrangères, noms en français, clés `id_<entité>`.
+- Tables préfixées par domaine : `u_` utilisateurs, sessions, audit ; `d_` dossiers (contact, déclaration, enfant, problématique, note, événement) ; `v_` ventes (vente, échéance, paiement, historique) ; `p_` listes de référence. Les préfixes des autres domaines se fixent à l'étape qui les crée. InnoDB, `utf8mb4_unicode_ci`, clés étrangères, noms en français, clés `id_<entité>`.
 - Chaque action sensible (connexion, création, modification, suppression) est journalisée par `$U->audit()`, avec sa cible quand elle porte sur un objet (`'user'`, `'contact'`).
 - Toute écriture sur un dossier passe par `$Contact->tracer()`, dans la même transaction que la donnée : journal d'audit, et chronologie (`d_evenement`) pour les faits qu'un utilisateur doit lire. Ni l'un ni l'autre ne reçoit de valeur de champ : noms de champs, identifiants, codes.
 - `d_contact.statut` ne s'écrit que par `$Contact->changerStatut()` ; les ventes et le programme l'appelleront avec l'origine `automatique`.
+- Finances : montants en centimes entiers (colonnes `INT` signées avec `CHECK`, pour que les soustractions SQL ne débordent pas) ; `v_paiement` est la seule source des sommes, lues par le fragment `Vente::SQL_SOMMES` (les totaux d'une liste se calculent avec le même `WHERE` que ses lignes) ; `v_vente.statut` et les caches de `v_echeance` ne s'écrivent que dans `Vente::recalculer()` ; une écriture ne se supprime jamais (annulation tracée ou écriture contraire) ; chaque écriture financière verrouille le dossier (`Vente::verrouiller()`) et fait ses contrôles de saisie avant d'ouvrir la transaction ; le « jour » d'un retard vient de PHP (`date('Y-m-d')`), jamais de `CURDATE()`.
+- Valeurs avant / après d'un changement financier : dans `v_historique` uniquement. Ni `u_audit` ni `d_evenement` ne reçoivent de montant ; la chronologie joint le montant à la lecture (clé `objet`).
+- Les automatismes du dossier (`Vente::automatismes()`) changent le statut d'un dossier pour le compte d'un profil qui n'a que la lecture sur les dossiers (`gestion`) : c'est voulu, l'écriture financière en est la cause.
+- Les ventes ne partent pas en cascade avec un dossier (`ON DELETE RESTRICT`) : tout script qui supprime un dossier efface d'abord ses ventes, ou les conserve (effacement RGPD, étape 8).
 - Colonnes d'un dossier servies par liste explicite (`Contact::COLONNES`), jamais `c.*` : une colonne ajoutée ne doit pas sortir par accident.
 - Aucune donnée personnelle dans un mail d'erreur ni dans un journal technique.
 - Messages d'erreur destinés à l'utilisateur en français.
@@ -87,4 +92,4 @@ Corps JSON : `$R = json_decode(file_get_contents("php://input"));`. Toujours vé
 
 ## Tests manuels
 
-Voir `README.md` (installation, création de l'admin, commandes curl). Les contrôles dans le navigateur sont dans `navup-front/outils/` ; ils nettoient derrière eux avec `script-cgi/purge-essais.php` (comptes `essai.*`, dossiers en `essai.…@navup.local`, refusé en production).
+Voir `README.md` (installation, création de l'admin, commandes curl). Les contrôles dans le navigateur sont dans `navup-front/outils/` ; ils nettoient derrière eux avec `script-cgi/purge-essais.php` (comptes `essai.*`, dossiers en `essai.…@navup.local` et leurs ventes, refusé en production), et vérifient les finances avec `script-cgi/verifier-finances.php` avant la purge.

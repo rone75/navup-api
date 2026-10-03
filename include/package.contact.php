@@ -425,8 +425,10 @@ class Contact
         global $U;
 
         $modules = array('dossier');
-        if ($U->can($user, 'famille', 'L')) {
-            $modules[] = 'famille';
+        foreach (array('famille', 'ventes', 'paiements') as $module) {
+            if ($U->can($user, $module, 'L')) {
+                $modules[] = $module;
+            }
         }
 
         return $modules;
@@ -435,6 +437,7 @@ class Contact
     /**
      * Événements d'un dossier, du plus récent au plus ancien, limités aux modules lisibles.
      * Le texte d'une note et le libellé d'une problématique sont joints à la lecture : ils ne sont pas recopiés dans l'événement.
+     * De même, le montant d'une vente ou d'un paiement est lu dans son écriture (clé `objet`), jamais dans l'événement.
      * Retourne array(total, événements).
      */
     public function chronologie($id_contact, $modules, $limit, $offset)
@@ -452,13 +455,20 @@ class Contact
                     u.identifiant AS auteur_identifiant, u.prenom AS auteur_prenom, u.nom AS auteur_nom,
                     n.texte AS note_texte,
                     COALESCE(p.intitule, cat.libelle) AS problematique_libelle,
-                    en.prenom AS enfant_prenom
+                    en.prenom AS enfant_prenom,
+                    v.id_vente AS vente_id, v.montant AS vente_montant, vo.libelle AS vente_offre,
+                    pa.id_vente AS paiement_id_vente, pa.type AS paiement_type, pa.montant AS paiement_montant, pa.date_paiement AS paiement_date,
+                    pm.libelle AS paiement_moyen, pa.date_annulation AS paiement_date_annulation
              FROM d_evenement e
              LEFT JOIN u_users u ON u.id_users = e.id_users
              LEFT JOIN d_note n ON e.objet_type = 'note' AND n.id_note = e.objet_id
              LEFT JOIN d_problematique p ON e.objet_type = 'problematique' AND p.id_problematique = e.objet_id
              LEFT JOIN p_categorie_problematique cat ON cat.code = p.code_categorie
              LEFT JOIN d_enfant en ON e.objet_type = 'enfant' AND en.id_enfant = e.objet_id
+             LEFT JOIN v_vente v ON e.objet_type = 'vente' AND v.id_vente = e.objet_id
+             LEFT JOIN p_offre vo ON vo.code = v.code_offre
+             LEFT JOIN v_paiement pa ON e.objet_type = 'paiement' AND pa.id_paiement = e.objet_id
+             LEFT JOIN p_moyen_paiement pm ON pm.code = pa.code_moyen
              WHERE e.id_contact = ? AND e.module IN ($in)
              ORDER BY e.date_evenement DESC, e.id_evenement DESC
              LIMIT ? OFFSET ?",
@@ -476,6 +486,25 @@ class Contact
             } elseif ($e->objet_type === 'enfant') {
                 $libelle = $e->enfant_prenom;
             }
+            // Vente ou écriture concernée : montants lus dans leur table, au moment de l'affichage
+            $objet = null;
+            if ($e->objet_type === 'vente' && $e->vente_id !== null) {
+                $objet = array(
+                    'id_vente' => (int) $e->vente_id,
+                    'reference' => 'VE-' . str_pad((string) (int) $e->vente_id, 5, '0', STR_PAD_LEFT),
+                    'offre' => $e->vente_offre,
+                    'montant' => (int) $e->vente_montant,
+                );
+            } elseif ($e->objet_type === 'paiement' && $e->paiement_type !== null) {
+                $objet = array(
+                    'id_vente' => (int) $e->paiement_id_vente,
+                    'type' => $e->paiement_type,
+                    'montant' => (int) $e->paiement_montant,
+                    'date_paiement' => $e->paiement_date,
+                    'moyen' => $e->paiement_moyen,
+                    'annulee' => $e->paiement_date_annulation !== null,
+                );
+            }
             $evenements[] = array(
                 'id_evenement' => (int) $e->id_evenement,
                 'type' => $e->type,
@@ -483,6 +512,7 @@ class Contact
                 'objet_type' => $e->objet_type,
                 'objet_id' => $e->objet_id === null ? null : (int) $e->objet_id,
                 'objet_libelle' => $libelle,
+                'objet' => $objet,
                 'details' => $e->details === null ? null : json_decode($e->details, true),
                 'origine' => $e->origine,
                 'auteur' => $this->auteur($e),

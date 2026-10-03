@@ -5,7 +5,7 @@
 // File:        script-cgi/purge-essais.php
 // Description: efface ce que laissent les parcours automatisés du front (navup-front/outils) :
 //              les comptes d'essai (identifiant commençant par « essai. », jamais un admin), leurs sessions,
-//              les dossiers d'essai (e-mail en essai.…@navup.local), leurs lignes d'audit, les événements et
+//              les dossiers d'essai (e-mail en essai.…@navup.local) avec leurs ventes et paiements, leurs lignes d'audit, les événements et
 //              sessions du navigateur sans tête, et le compteur d'échecs de connexion des adresses locales.
 //              Refusé en production ($_PROD = 1).
 // Usage:       php script-cgi/purge-essais.php
@@ -53,6 +53,11 @@ $dossiers = $Mysql->fetchAll("SELECT id_contact FROM d_contact WHERE email LIKE 
 foreach ($dossiers as $d) {
     $idc = (int) $d->id_contact;
     $nb_audit += $Mysql->execute("DELETE FROM u_audit WHERE cible_type = 'contact' AND cible_id = ?", array($idc), 'i');
+    // Les ventes ne partent pas en cascade avec un dossier : historique, écritures et échéances s'effacent d'abord
+    foreach (array('v_historique', 'v_paiement', 'v_echeance') as $table) {
+        $Mysql->execute("DELETE FROM $table WHERE id_vente IN (SELECT id_vente FROM v_vente WHERE id_contact = ?)", array($idc), 'i');
+    }
+    $Mysql->execute("DELETE FROM v_vente WHERE id_contact = ?", array($idc), 'i');
     $Mysql->execute("DELETE FROM d_contact WHERE id_contact = ?", array($idc), 'i');
 }
 
