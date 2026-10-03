@@ -3,7 +3,7 @@
 //=======================================================================
 // File:        package.mysql.php
 // Description: connexion MySQL (mysqli) + helpers de requêtes préparées
-// Created:     2014-01-27 - refonte ManiCarton 2026-09-13
+// Created:     2014-01-27 - refonte ManiCarton 2026-09-13 - NavUp 2026-10-03
 // Author:      Corre Erwan (corre_erwan@yahoo.fr)
 //
 // Copyright (C) 2014 Erwan Corre
@@ -11,39 +11,28 @@
 
 class Mysql
 {
-    private $adresse = "localhost";
-    private $user = "root";
-    private $pass = "59XTVs48!";
-    private $base = "navup";
-
     private $affectedRows = 0;
     private $insertId = 0;
 
+    /**
+     * Connexion à la base décrite par $_DB (require/secret.php, hors dépôt) : aucun identifiant dans le code.
+     */
     public function OuvrirBase()
     {
+        global $_DB;
+
         // MYSQLI_REPORT_OFF AVANT la connexion : depuis PHP 8.1 le mode par défaut
         // lève une mysqli_sql_exception (non catchée) si la connexion échoue.
         mysqli_report(MYSQLI_REPORT_OFF);
 
-        $mysqli = @new mysqli($this->adresse, $this->user, $this->pass, $this->base);
+        $base = isset($_DB['base']) ? $_DB['base'] : '';
 
-        if ($mysqli->connect_errno) {
-            $this->Erreur("CONNEXION " . $this->base, __FILE__, $mysqli->connect_error);
-        }
-
-        $mysqli->set_charset("utf8mb4");
-
-        return $mysqli;
-    }
-
-    /**
-     * Connexion à une autre base du même serveur (ex. carton_sudev, source de l'import), mêmes identifiants.
-     */
-    public function OuvrirAutreBase($base)
-    {
-        mysqli_report(MYSQLI_REPORT_OFF);
-
-        $mysqli = @new mysqli($this->adresse, $this->user, $this->pass, $base);
+        $mysqli = @new mysqli(
+            isset($_DB['hote']) ? $_DB['hote'] : 'localhost',
+            isset($_DB['utilisateur']) ? $_DB['utilisateur'] : '',
+            isset($_DB['mot_de_passe']) ? $_DB['mot_de_passe'] : '',
+            $base
+        );
 
         if ($mysqli->connect_errno) {
             $this->Erreur("CONNEXION " . $base, __FILE__, $mysqli->connect_error);
@@ -88,7 +77,8 @@ class Mysql
         }
 
         if (!$stmt->execute()) {
-            $this->Erreur($sql . " | params=" . json_encode($params, JSON_UNESCAPED_UNICODE), $file, $stmt->error);
+            // Les valeurs liées ne sont jamais jointes au diagnostic : elles peuvent contenir des données personnelles
+            $this->Erreur($sql, $file, $stmt->error);
         }
 
         $result = $stmt->get_result();
@@ -176,7 +166,7 @@ class Mysql
      */
     public function Erreur($query, $file, $error = null)
     {
-        global $SQL, $_MAIL_ERREUR;
+        global $SQL, $_MAIL_ERREUR, $_MAIL_EXPEDITEUR;
 
         $date = date("Y-m-d H:i:s");
         $ip = isset($_SERVER["REMOTE_ADDR"]) ? $_SERVER["REMOTE_ADDR"] : "localhost";
@@ -185,18 +175,19 @@ class Mysql
             $error = (isset($SQL) && isset($SQL->error)) ? $SQL->error : '';
         }
 
-        $dest = (isset($_MAIL_ERREUR) && $_MAIL_ERREUR !== '') ? $_MAIL_ERREUR : "erwan@anime-store.fr";
-        $uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : 'cli';
+        // Chemin seul : la chaîne de requête de l'URL peut porter des termes de recherche (noms, emails)
+        $uri = isset($_SERVER['REQUEST_URI']) ? (string) parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) : 'cli';
 
-        $headers = 'From: "Manicarton" <noreply@manicarton.com>' . "\r\n";
-        $headers .= 'Reply-to: "Manicarton" <noreply@manicarton.com' . ">\r\n";
-        $headers .= 'MIME-Version: 1.0' . "\r\n";
-        $headers .= 'Return-Path: <erreur@manicarton.com' . ">\r\n";
-        $headers .= 'Content-Type: text/html; charset="UTF-8"' . "\r\n";
-        $headers .= 'Content-Transfer-Encoding: 8bit' . "\r\n";
+        if (php_sapi_name() !== 'cli' && isset($_MAIL_ERREUR) && $_MAIL_ERREUR !== '') {
+            $from = (isset($_MAIL_EXPEDITEUR) && $_MAIL_EXPEDITEUR !== '') ? $_MAIL_EXPEDITEUR : "noreply@navup.fr";
 
-        if (php_sapi_name() !== 'cli') {
-            @mail($dest, "Erreur SQL Manicarton : $file", "date : $date - IP : $ip - SQL : $query - $error - $uri", $headers, "-ferreur@manicarton.com");
+            $headers = 'From: "NavUp" <' . $from . ">\r\n";
+            $headers .= 'Reply-to: "NavUp" <' . $from . ">\r\n";
+            $headers .= 'MIME-Version: 1.0' . "\r\n";
+            $headers .= 'Content-Type: text/plain; charset="UTF-8"' . "\r\n";
+            $headers .= 'Content-Transfer-Encoding: 8bit' . "\r\n";
+
+            @mail($_MAIL_ERREUR, "Erreur SQL NavUp : $file", "date : $date - IP : $ip - SQL : $query - $error - $uri", $headers);
         }
 
         if (php_sapi_name() === 'cli') {

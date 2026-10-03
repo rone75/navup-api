@@ -495,14 +495,4 @@ class ControleData
 
         return $str;
     }
-
-    public function hashPassword($pw)
-    {
-        // Un peu de sel
-
-        $PREFIX_PW = 'tA3?59?ù!:;^$';
-        $SUFFIX_PW = 'Pd455Eù!d?.12';
-
-        return sha1($PREFIX_PW . $pw . $SUFFIX_PW);
-    }
 }

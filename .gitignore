@@ -1,0 +1,4 @@
+# Secrets et réglages de la machine (identifiants de base, clés Stripe, SMTP) : jamais dans le dépôt
+require/secret.php
+.vscode/
+*.log

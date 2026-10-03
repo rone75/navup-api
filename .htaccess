@@ -1,0 +1,16 @@
+# NavUp API — protections du web root
+Options -Indexes
+
+RewriteEngine on
+# Dossiers internes jamais servis en HTTP (dépôt git, classes, config et secrets, SQL, scripts CLI)
+RewriteRule ^(\.git|include|require|sql|script-cgi)(/|$) - [F,L]
+
+# Fichiers cachés (.gitignore…) et fichiers sensibles
+<FilesMatch "(^\.|\.(sql|md|log)$)">
+    Require all denied
+</FilesMatch>
+
+# Compression des réponses JSON
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE application/json text/plain
+</IfModule>
