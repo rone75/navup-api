@@ -5,8 +5,10 @@
 // File:        script-cgi/purge-essais.php
 // Description: efface ce que laissent les parcours automatisés du front (navup-front/outils) :
 //              les comptes d'essai (identifiant commençant par « essai. », jamais un admin), leurs sessions,
-//              les dossiers d'essai (e-mail en essai.…@navup.local) avec leurs ventes et paiements, leurs lignes d'audit, les événements et
-//              sessions du navigateur sans tête, et le compteur d'échecs de connexion des adresses locales.
+//              les dossiers d'essai (e-mail en essai.…@navup.local) avec leurs ventes, paiements, rendez-vous, échanges et tâches,
+//              les tâches sans dossier créées par un compte d'essai ou par un essai (clé de saisie en e55a1e55-…),
+//              leurs lignes d'audit, les événements et sessions du navigateur sans tête, et le compteur d'échecs de
+//              connexion des adresses locales.
 //              Refusé en production ($_PROD = 1).
 // Usage:       php script-cgi/purge-essais.php
 //========================================================================
@@ -39,6 +41,18 @@ $comptes = $Mysql->fetchAll(
 
 $nb_audit = 0;
 
+// Tâches sans dossier laissées par les essais : celles d'un compte d'essai, et celles dont la clé de saisie porte la marque des essais
+$taches = $Mysql->fetchAll(
+    "SELECT t.id_tache FROM t_tache t LEFT JOIN u_users u ON u.id_users = t.id_users
+     WHERE t.id_contact IS NULL AND (t.cle_saisie LIKE ? OR (u.identifiant LIKE ? AND u.profil <> 'admin'))",
+    array('e55a1e55-%', 'essai.%'),
+    'ss'
+);
+foreach ($taches as $t) {
+    $nb_audit += $Mysql->execute("DELETE FROM u_audit WHERE cible_type = 'tache' AND cible_id = ?", array((int) $t->id_tache), 'i');
+    $Mysql->execute("DELETE FROM t_tache WHERE id_tache = ?", array((int) $t->id_tache), 'i');
+}
+
 foreach ($comptes as $c) {
     $id = (int) $c->id_users;
     // Actions menées par le compte, puis actions menées sur lui
@@ -48,7 +62,8 @@ foreach ($comptes as $c) {
     $Mysql->execute("DELETE FROM u_users WHERE id_users = ?", array($id), 'i');
 }
 
-// Dossiers d'essai : e-mail en essai.…@navup.local (leurs déclarations, enfants, problématiques, notes et événements partent en cascade)
+// Dossiers d'essai : e-mail en essai.…@navup.local (leurs déclarations, enfants, problématiques, notes, événements,
+// rendez-vous, échanges et tâches partent en cascade)
 $dossiers = $Mysql->fetchAll("SELECT id_contact FROM d_contact WHERE email LIKE ?", array('essai.%@navup.local'), 's');
 foreach ($dossiers as $d) {
     $idc = (int) $d->id_contact;
@@ -72,6 +87,6 @@ $nb_sessions = $Mysql->execute("DELETE FROM u_token WHERE user_agent LIKE ?", ar
 
 $Mysql->execute("DELETE FROM u_login_ip WHERE ip IN (?, ?)", array('::1', '127.0.0.1'), 'ss');
 
-echo count($comptes) . " compte(s) et " . count($dossiers) . " dossier(s) d'essai supprimé(s), $nb_audit ligne(s) d'audit, $nb_sessions session(s) du navigateur sans tête.\n";
+echo count($comptes) . " compte(s), " . count($dossiers) . " dossier(s) et " . count($taches) . " tâche(s) sans dossier d'essai supprimé(s), $nb_audit ligne(s) d'audit, $nb_sessions session(s) du navigateur sans tête.\n";
 
 exit(0);

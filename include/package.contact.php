@@ -3,7 +3,7 @@
 //=======================================================================
 // File:        package.contact.php
 // Description: dossiers (prospects et clients) : cycle de vie, droits par dossier, recherche,
-//              données familiales (déclaration, enfants, problématiques, notes), chronologie.
+//              données familiales (déclaration, enfants, problématiques, notes), chronologie, verrou d'écriture.
 //              Requiert package.saisie.php ($S), package.user.php ($U), package.mysql.php ($Mysql).
 // Created:     2026-10-03
 // Author:      Corre Erwan (corre_erwan@yahoo.fr)
@@ -24,10 +24,15 @@ class Contact
     const STATUTS_PROBLEMATIQUE = array('ouverte', 'en_cours', 'close');
     const NIVEAUX_SCOLAIRES = array('maternelle', 'primaire', 'college', 'lycee', 'superieur', 'autre');
 
+    // Prochaine action d'un dossier : l'échéance de sa tâche ouverte la plus proche (t_tache, étape 4).
+    // La date est visible de tous les profils ; l'intitulé de la tâche se lit par v1/contacts/suivi/, selon les droits.
+    const SQL_PROCHAINE_ACTION = "(SELECT MIN(ta.date_echeance) FROM t_tache ta WHERE ta.id_contact = c.id_contact AND ta.date_cloture IS NULL)";
+
     // Colonnes servies par la liste, la recherche et la fiche : identité et suivi uniquement.
     // Jamais de c.* : une colonne ajoutée à d_contact ne doit pas sortir par accident.
     const COLONNES = "c.id_contact, c.prenom, c.nom, c.email, c.telephone, c.statut, c.date_statut, c.code_origine,
-            o.libelle AS origine, c.origine_precision, c.date_premier_contact, c.date_inscription, c.date_prochaine_action,
+            o.libelle AS origine, c.origine_precision, c.date_premier_contact, c.date_inscription,
+            " . self::SQL_PROCHAINE_ACTION . " AS date_prochaine_action,
             c.date_derniere_interaction, c.date_archivage, c.date_creation, c.date_modif";
 
     const SQL_FROM = " FROM d_contact c LEFT JOIN p_origine o ON o.code = c.code_origine";
@@ -50,7 +55,7 @@ class Contact
         global $Mysql;
 
         return $Mysql->fetchOne(
-            "SELECT " . self::COLONNES . ", c.prochaine_action" . self::SQL_FROM . " WHERE c.id_contact = ?",
+            "SELECT " . self::COLONNES . self::SQL_FROM . " WHERE c.id_contact = ?",
             array((int) $id_contact),
             'i'
         );
@@ -83,6 +88,27 @@ class Contact
         return array($user, $contact);
     }
 
+    /**
+     * Condition SQL limitant une liste (ventes, paiements, rendez-vous, échanges) aux lignes dont le dossier est lisible
+     * par l'utilisateur (alias `c` sur d_contact). Retourne array(sql, params), ou null s'il ne peut lire aucun dossier.
+     */
+    public function conditionLisibles($user)
+    {
+        global $U;
+
+        $statuts = array();
+        foreach (self::GROUPES as $groupe => $liste) {
+            if ($U->can($user, $groupe, 'L')) {
+                $statuts = array_merge($statuts, $liste);
+            }
+        }
+        if (count($statuts) === 0) {
+            return null;
+        }
+
+        return array("c.statut IN (" . implode(', ', array_fill(0, count($statuts), '?')) . ")", $statuts);
+    }
+
     /** Comme exigerDossier, plus le droit sur les données familiales (module famille). */
     public function exigerFamille($id_contact, $niveau = 'L')
     {
@@ -96,13 +122,10 @@ class Contact
         return array($user, $contact);
     }
 
-    /**
-     * Dossier tel que servi au front. Le texte de la prochaine action est une note interne :
-     * il n'est joint qu'avec le droit famille ($avecAction) ; sa date reste visible de tous.
-     */
-    public function sortie($row, $avecAction = false)
+    /** Dossier tel que servi au front : identité et suivi, aucune donnée familiale ni texte interne. */
+    public function sortie($row)
     {
-        $out = array(
+        return array(
             'id_contact' => (int) $row->id_contact,
             'reference' => self::reference($row->id_contact),
             'prenom' => $row->prenom,
@@ -124,11 +147,6 @@ class Contact
             'date_creation' => $row->date_creation,
             'date_modif' => $row->date_modif,
         );
-        if ($avecAction) {
-            $out['prochaine_action'] = property_exists($row, 'prochaine_action') ? $row->prochaine_action : null;
-        }
-
-        return $out;
     }
 
     // SPÉCIFICATIONS DE SAISIE #######################################
@@ -144,8 +162,6 @@ class Contact
             'origine_precision' => array('type' => 'str', 'max' => 150, 'libelle' => "précision sur l'origine"),
             'date_premier_contact' => array('type' => 'date', 'libelle' => 'date du premier contact'),
             'date_inscription' => array('type' => 'date', 'libelle' => "date d'inscription"),
-            'date_prochaine_action' => array('type' => 'date', 'libelle' => 'échéance de la prochaine action'),
-            'prochaine_action' => array('type' => 'str', 'max' => 255, 'libelle' => 'prochaine action'),
         );
     }
 
@@ -246,10 +262,25 @@ class Contact
     // ÉCRITURES TRACÉES ##############################################
 
     /**
+     * Ouvre la transaction d'une écriture en verrouillant le dossier : deux envois rapprochés passent l'un après
+     * l'autre, et le second relit l'état laissé par le premier. Ventes, paiements, rendez-vous, échanges et tâches
+     * d'un dossier s'écrivent tous sous ce verrou.
+     * Les contrôles de saisie (lireChamps) se font avant : une lecture faite avant le verrou serait périmée.
+     */
+    public function verrouiller($id_contact)
+    {
+        global $SQL, $Mysql;
+
+        $SQL->begin_transaction();
+        $Mysql->fetchOne("SELECT id_contact FROM d_contact WHERE id_contact = ? FOR UPDATE", array((int) $id_contact), 'i');
+    }
+
+    /**
      * Trace une écriture sur un dossier : journal d'audit (sécurité, hors dossier) et, si $evenement est fourni,
      * chronologie du dossier (faits importants, lus par les utilisateurs). À appeler dans la même transaction que la donnée.
      * Ni l'un ni l'autre ne reçoit de valeur de champ : noms de champs, identifiants et codes seulement.
-     * $evenement : array('type', 'module' => 'dossier'|'famille', 'objet_type', 'objet_id', 'details', 'origine').
+     * $evenement : array('type', 'module' => 'dossier'|'famille'|…, 'objet_type', 'objet_id', 'details', 'origine', 'date').
+     * `date` (AAAA-MM-JJ HH:MM:SS) : la date du fait quand elle n'est pas celle de la saisie (un appel noté le lendemain).
      */
     public function tracer($id_contact, $id_users, $action, $details = null, $evenement = null)
     {
@@ -262,7 +293,8 @@ class Contact
         }
         $d = isset($evenement['details']) ? json_encode($evenement['details'], JSON_UNESCAPED_UNICODE) : null;
         $Mysql->execute(
-            "INSERT INTO d_evenement (id_contact, type, module, objet_type, objet_id, details, origine, id_users) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO d_evenement (id_contact, type, module, objet_type, objet_id, details, origine, id_users, date_evenement)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, NOW()))",
             array(
                 (int) $id_contact,
                 $evenement['type'],
@@ -272,14 +304,15 @@ class Contact
                 $d,
                 $evenement['origine'] ?? 'utilisateur',
                 $id_users === null ? null : (int) $id_users,
+                $evenement['date'] ?? null,
             ),
-            'isssissi'
+            'isssissis'
         );
     }
 
     /**
-     * Seul point d'écriture de d_contact.statut. Aux étapes suivantes, les ventes et le programme
-     * l'appelleront avec $origine = 'automatique'. Retourne false si le statut ne change pas.
+     * Seul point d'écriture de d_contact.statut. Les ventes (premier paiement) et les rendez-vous (demande, créneau fixé)
+     * l'appellent avec $origine = 'automatique'. Retourne false si le statut ne change pas.
      */
     public function changerStatut($contact, $nouveau, $id_users, $origine = 'utilisateur')
     {
@@ -425,7 +458,7 @@ class Contact
         global $U;
 
         $modules = array('dossier');
-        foreach (array('famille', 'ventes', 'paiements') as $module) {
+        foreach (array('famille', 'ventes', 'paiements', 'rendez_vous', 'appels', 'taches') as $module) {
             if ($U->can($user, $module, 'L')) {
                 $modules[] = $module;
             }
@@ -437,14 +470,19 @@ class Contact
     /**
      * Événements d'un dossier, du plus récent au plus ancien, limités aux modules lisibles.
      * Le texte d'une note et le libellé d'une problématique sont joints à la lecture : ils ne sont pas recopiés dans l'événement.
-     * De même, le montant d'une vente ou d'un paiement est lu dans son écriture (clé `objet`), jamais dans l'événement.
+     * De même, le montant d'une vente ou d'un paiement est lu dans son écriture (clé `objet`), jamais dans l'événement ;
+     * un rendez-vous, un échange ou une tâche aussi (clé `suivi`). Leurs textes (motif, compte rendu) sont des notes internes :
+     * la requête ne les lit qu'avec le droit famille ($avecFamille), le profil de gestion voit le fait sans son texte.
      * Retourne array(total, événements).
      */
-    public function chronologie($id_contact, $modules, $limit, $offset)
+    public function chronologie($id_contact, $modules, $limit, $offset, $avecFamille = false)
     {
         global $Mysql;
 
         $id = (int) $id_contact;
+        $textes = $avecFamille
+            ? "r.motif AS rdv_motif, r.motif_cloture AS rdv_motif_cloture, r.compte_rendu AS rdv_compte_rendu, i.motif AS ech_motif, i.compte_rendu AS ech_compte_rendu"
+            : "NULL AS rdv_motif, NULL AS rdv_motif_cloture, NULL AS rdv_compte_rendu, NULL AS ech_motif, NULL AS ech_compte_rendu";
         $in = implode(', ', array_fill(0, count($modules), '?'));
         $params = array_merge(array($id), $modules);
 
@@ -458,7 +496,14 @@ class Contact
                     en.prenom AS enfant_prenom,
                     v.id_vente AS vente_id, v.montant AS vente_montant, vo.libelle AS vente_offre,
                     pa.id_vente AS paiement_id_vente, pa.type AS paiement_type, pa.montant AS paiement_montant, pa.date_paiement AS paiement_date,
-                    pm.libelle AS paiement_moyen, pa.date_annulation AS paiement_date_annulation
+                    pm.libelle AS paiement_moyen, pa.date_annulation AS paiement_date_annulation,
+                    r.id_rdv AS rdv_id, r.type AS rdv_type, r.statut AS rdv_statut, r.date_debut AS rdv_date_debut, r.duree AS rdv_duree,
+                    r.canal AS rdv_canal, rp.date_debut AS rdv_precedent_date,
+                    i.id_interaction AS ech_id, i.canal AS ech_canal, i.sens AS ech_sens, i.resultat AS ech_resultat,
+                    i.date_interaction AS ech_date, i.duree AS ech_duree, i.date_rappel AS ech_date_rappel, i.id_users AS ech_id_users,
+                    t.id_tache AS tache_id, t.titre AS tache_titre, t.alerte AS tache_alerte, t.nature AS tache_nature,
+                    t.categorie AS tache_categorie, t.date_echeance AS tache_date_echeance,
+                    $textes
              FROM d_evenement e
              LEFT JOIN u_users u ON u.id_users = e.id_users
              LEFT JOIN d_note n ON e.objet_type = 'note' AND n.id_note = e.objet_id
@@ -469,6 +514,10 @@ class Contact
              LEFT JOIN p_offre vo ON vo.code = v.code_offre
              LEFT JOIN v_paiement pa ON e.objet_type = 'paiement' AND pa.id_paiement = e.objet_id
              LEFT JOIN p_moyen_paiement pm ON pm.code = pa.code_moyen
+             LEFT JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
+             LEFT JOIN r_rdv rp ON rp.id_rdv = r.id_rdv_precedent
+             LEFT JOIN i_interaction i ON e.objet_type = 'interaction' AND i.id_interaction = e.objet_id
+             LEFT JOIN t_tache t ON e.objet_type = 'tache' AND t.id_tache = e.objet_id
              WHERE e.id_contact = ? AND e.module IN ($in)
              ORDER BY e.date_evenement DESC, e.id_evenement DESC
              LIMIT ? OFFSET ?",
@@ -477,6 +526,7 @@ class Contact
 
         $evenements = array();
         foreach ($rows as $e) {
+            $details = $e->details === null ? null : json_decode($e->details, true);
             // Libellé de l'objet concerné, lu dans sa table (null s'il a été supprimé depuis)
             $libelle = null;
             if ($e->objet_type === 'note') {
@@ -505,6 +555,57 @@ class Contact
                     'annulee' => $e->paiement_date_annulation !== null,
                 );
             }
+            // Rendez-vous, échange ou tâche concerné (clé `suivi`), lu de même dans sa table
+            $suivi = null;
+            if ($e->objet_type === 'rdv' && $e->rdv_id !== null) {
+                $suivi = array(
+                    'id_rdv' => (int) $e->rdv_id,
+                    'type' => $e->rdv_type,
+                    'statut' => $e->rdv_statut,
+                    'date_debut' => $e->rdv_date_debut,
+                    'duree' => (int) $e->rdv_duree,
+                    'canal' => $e->rdv_canal,
+                    'date_precedente' => $e->rdv_precedent_date,
+                );
+                // Un seul texte par fait, celui qui l'explique : le motif à la prise de rendez-vous (pas à chaque créneau),
+                // la raison d'une annulation ou d'une absence, le compte rendu quand il est écrit (pas à chaque correction).
+                $action = $details['action'] ?? null;
+                if ($avecFamille) {
+                    if ($action === 'creation') {
+                        $suivi['texte'] = $e->rdv_motif;
+                    } elseif (in_array($action, array('annulation', 'absent'), true)) {
+                        $suivi['texte'] = $e->rdv_motif_cloture;
+                    } elseif (($action === 'effectue' && !empty($details['compte_rendu'])) || ($action === 'compte_rendu' && ($details['etat'] ?? null) === 'ajout')) {
+                        $suivi['texte'] = $e->rdv_compte_rendu;
+                    }
+                }
+            } elseif ($e->objet_type === 'interaction' && $e->ech_id !== null) {
+                $suivi = array(
+                    'id_interaction' => (int) $e->ech_id,
+                    'canal' => $e->ech_canal,
+                    'sens' => $e->ech_sens,
+                    'resultat' => $e->ech_resultat,
+                    'date_interaction' => $e->ech_date,
+                    'duree' => $e->ech_duree === null ? null : (int) $e->ech_duree,
+                    'date_rappel' => $e->ech_date_rappel,
+                    'id_users' => $e->ech_id_users === null ? null : (int) $e->ech_id_users,
+                );
+                if ($avecFamille && ($details['action'] ?? null) === 'creation') {
+                    $suivi['motif'] = $e->ech_motif;
+                    $suivi['texte'] = $e->ech_compte_rendu;
+                }
+            } elseif ($e->objet_type === 'tache' && $e->tache_id !== null) {
+                $suivi = array(
+                    'id_tache' => (int) $e->tache_id,
+                    'nature' => $e->tache_nature,
+                    'alerte' => $e->tache_alerte,
+                    'date_echeance' => $e->tache_date_echeance,
+                );
+                // L'intitulé d'une tâche de suivi est une note interne
+                if ($e->tache_categorie === 'gestion' || $avecFamille) {
+                    $suivi['titre'] = $e->tache_titre;
+                }
+            }
             $evenements[] = array(
                 'id_evenement' => (int) $e->id_evenement,
                 'type' => $e->type,
@@ -513,7 +614,8 @@ class Contact
                 'objet_id' => $e->objet_id === null ? null : (int) $e->objet_id,
                 'objet_libelle' => $libelle,
                 'objet' => $objet,
-                'details' => $e->details === null ? null : json_decode($e->details, true),
+                'suivi' => $suivi,
+                'details' => $details,
                 'origine' => $e->origine,
                 'auteur' => $this->auteur($e),
                 'date_evenement' => $e->date_evenement,

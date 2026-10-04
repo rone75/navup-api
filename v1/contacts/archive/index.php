@@ -7,6 +7,7 @@ include "../../../include/package.response.php";
 include "../../../include/package.user.php";
 include "../../../include/package.saisie.php";
 include "../../../include/package.contact.php";
+include "../../../include/package.suivi.php";
 include "../../../require/param.php";
 
 $H = new Header();
@@ -17,6 +18,7 @@ $CD = new ControleData();
 $U = new User();
 $S = new Saisie();
 $Contact = new Contact();
+$Tache = new Tache();
 
 // Connexion Mysql
 $Mysql = new Mysql();
@@ -28,6 +30,7 @@ date_default_timezone_set('Europe/Paris');
 
 // Classer un dossier sans suite, ou le rouvrir ################################
 // PUT {id_contact, archive: 0|1}. Un dossier classé quitte les listes sans être supprimé.
+// Ses tâches automatiques de suivi (rendez-vous, rappels) se ferment ; celles de paiement restent.
 
 if ($_SERVER['REQUEST_METHOD'] === "PUT") {
 
@@ -56,10 +59,12 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
             null,
             array('type' => 'archivage', 'details' => array('archive' => $archive))
         );
+        // Les alertes de suivi d'un dossier classé s'arrêtent (ses alertes de paiement restent) ; elles reprennent s'il est rouvert
+        $Tache->synchroniser($id);
         $SQL->commit();
     }
 
-    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id), $U->can($user, 'famille', 'L'))));
+    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id))));
 }
 
 $Response->methodNotAllowed();

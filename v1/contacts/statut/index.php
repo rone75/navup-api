@@ -48,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
     $Contact->changerStatut($contact, $R->statut, (int) $user->id_users);
     $SQL->commit();
 
-    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id), $U->can($user, 'famille', 'L'))));
+    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id))));
 }
 
 $Response->methodNotAllowed();

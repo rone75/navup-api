@@ -333,19 +333,9 @@ class Vente
      */
     public function conditionDossiersLisibles($user)
     {
-        global $U;
+        global $Contact;
 
-        $statuts = array();
-        foreach (Contact::GROUPES as $groupe => $liste) {
-            if ($U->can($user, $groupe, 'L')) {
-                $statuts = array_merge($statuts, $liste);
-            }
-        }
-        if (count($statuts) === 0) {
-            return null;
-        }
-
-        return array("c.statut IN (" . implode(', ', array_fill(0, count($statuts), '?')) . ")", $statuts);
+        return $Contact->conditionLisibles($user);
     }
 
     /**
@@ -364,20 +354,12 @@ class Vente
         return $Contact->conditionRecherche($q);
     }
 
-    /** Date AAAA-MM-JJ lue dans $_GET, ou null si absente ; 400 si elle est mal formée. */
+    /** Date AAAA-MM-JJ lue dans $_GET (voir Saisie::dateFiltre). */
     public function dateFiltre($cle)
     {
-        global $Response;
+        global $S;
 
-        if (!isset($_GET[$cle]) || !is_string($_GET[$cle]) || $_GET[$cle] === '') {
-            return null;
-        }
-        $d = DateTime::createFromFormat('Y-m-d', $_GET[$cle]);
-        if ($d === false || $d->format('Y-m-d') !== $_GET[$cle]) {
-            $Response->validationError("Date invalide (format AAAA-MM-JJ) : $cle");
-        }
-
-        return $_GET[$cle];
+        return $S->dateFiltre($cle);
     }
 
     // SAISIE #########################################################
@@ -410,19 +392,12 @@ class Vente
         );
     }
 
-    /** Clé de saisie d'un formulaire (UUID) : null si absente, 400 si mal formée. */
+    /** Clé de saisie d'un formulaire (voir Saisie::lireCle). */
     public function lireCle($R)
     {
-        global $Response;
+        global $S;
 
-        if (!is_object($R) || !isset($R->cle_saisie)) {
-            return null;
-        }
-        if (!is_string($R->cle_saisie) || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $R->cle_saisie)) {
-            $Response->validationError("Clé de saisie invalide.");
-        }
-
-        return $R->cle_saisie;
+        return $S->lireCle($R);
     }
 
     /**
@@ -614,10 +589,9 @@ class Vente
      */
     private function verrouiller($id_contact)
     {
-        global $SQL, $Mysql;
+        global $Contact;
 
-        $SQL->begin_transaction();
-        $Mysql->fetchOne("SELECT id_contact FROM d_contact WHERE id_contact = ? FOR UPDATE", array((int) $id_contact), 'i');
+        $Contact->verrouiller($id_contact);
     }
 
     private function historiser($id_vente, $objet, $objet_id, $action, $avant, $apres, $id_users, $origine = 'utilisateur')

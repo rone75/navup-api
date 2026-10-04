@@ -28,7 +28,11 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < sql/002_login_ip.sql
    mariadb -unavup -p navup < sql/010_dossiers.sql
    mariadb -unavup -p navup < sql/020_ventes.sql
+   mariadb -unavup -p navup < sql/030_suivi.sql
+   mariadb -unavup -p navup < sql/031_prochaine_action.sql
    ```
+
+   Sur une base déjà en service (étape 3), `030_suivi.sql` convertit les « prochaines actions » des dossiers en tâches ; `031_prochaine_action.sql` retire ensuite leurs deux colonnes et ne s'applique qu'une fois l'API de l'étape 4 en place. Les deux fichiers se rejouent sans effet.
 
 4. Créer le premier administrateur. Sans `--password`, un mot de passe conforme est généré et affiché une seule fois :
 
@@ -109,7 +113,8 @@ Règles tenues par l'API :
 - **Téléphone** : enregistré au format international. Un numéro français en `0…` devient `+33…` ; un numéro d'outre-mer ou étranger se saisit avec son indicatif.
 - **Identifiant client** : `NU-` suivi du numéro de dossier sur cinq chiffres ; déduit, jamais stocké.
 - **Texte libre** : lié tel quel (aucun `strip_tags`), borné en longueur, échappé à l'affichage par le front.
-- **Données familiales** : `d_contact` n'en contient aucune ; la liste et la recherche ne lisent que cette table. Le filtre par catégorie de problématique répond 403 sans le droit `famille`. Le texte de la prochaine action n'est servi qu'avec ce droit ; sa date reste visible.
+- **Données familiales** : `d_contact` n'en contient aucune ; la liste et la recherche ne lisent que cette table. Le filtre par catégorie de problématique répond 403 sans le droit `famille`.
+- **Prochaine action** : depuis l'étape 4, c'est l'échéance de la tâche ouverte la plus proche du dossier (`date_prochaine_action`, calculée). Sa date est visible de tous ; son intitulé se lit par `v1/contacts/suivi/`, selon les droits. Les filtres `action=retard` (une tâche due aujourd'hui ou en retard) et `action=prevue` (une tâche ouverte) et le tri `action` s'appuient sur les tâches.
 - **Statut** : écrit uniquement par `Contact::changerStatut()`, daté dans la chronologie.
 - **Journal d'audit et chronologie** : noms de champs, identifiants et codes seulement, jamais une valeur saisie. Le texte d'une note ou d'une déclaration n'existe qu'à un seul endroit en base ; la chronologie le joint à la lecture.
 - **Historique des textes** : une description ou un objectif corrigé remplace l'ancien texte ; la fiche indique qui a modifié et quand. L'historique demandé par le cahier des charges (§7) porte sur les statuts, les priorités et les notes d'évolution.
@@ -150,9 +155,52 @@ Règles tenues par l'API :
 
 `php script-cgi/verifier-finances.php` (lecture seule, utilisable en production) recalcule chaque vente depuis ses écritures et sort avec le code 1 au premier écart.
 
+## Endpoints de l'étape 4 : rendez-vous, appels et tâches
+
+Dates et heures de Paris (la session MySQL est réglée sur ce fuseau à la connexion). Le motif, la raison d'une annulation, le compte rendu et l'intitulé d'une tâche de suivi sont des notes internes : ils ne sortent qu'avec le droit `famille`, et ne s'écrivent qu'avec ce droit complet.
+
+| Méthode et chemin | Rôle | Accès |
+|---|---|---|
+| `GET v1/contacts/suivi/` `?id=` | bloc de suivi d'un dossier : synthèse (prochain rendez-vous, dernier échange, prochaine action), rendez-vous, derniers échanges, tâches ouvertes ; chaque partie selon son droit | lecture du dossier |
+| `GET v1/rendez-vous/` `?du=&au=` | agenda d'une période (62 jours au plus) : rendez-vous à confirmer, confirmés, effectués ou manqués, et `demandes` sans créneau | `rendez_vous` lecture |
+| `GET v1/rendez-vous/` `?id=` | un rendez-vous, la chaîne de ses reports, leur historique, la `proposition` éventuelle | `rendez_vous` lecture |
+| `POST v1/rendez-vous/` `{id_contact, type?, canal?, duree?, motif?, id_users_responsable?, date?, heure?, statut?, cle_saisie?}` | prendre un rendez-vous ; sans date ni heure, une demande | `rendez_vous` complet |
+| `PUT v1/rendez-vous/` `{id_rdv, type?, duree?, canal?, motif?, id_users_responsable?}` | corriger la description | `rendez_vous` complet |
+| `PUT v1/rendez-vous/statut/` `{id_rdv, statut, date?, heure?, duree?, motif_cloture?, compte_rendu?}` | fixer le créneau d'une demande, confirmer, noter l'issue (effectué, absent), annuler, rétablir | `rendez_vous` complet |
+| `PUT v1/rendez-vous/report/` `{id_rdv, date, heure, duree?, statut?}` | déplacer : un nouveau rendez-vous chaîné à l'ancien | `rendez_vous` complet |
+| `PUT v1/rendez-vous/compte-rendu/` `{id_rdv, compte_rendu}` | écrire, corriger ou retirer le compte rendu d'un rendez-vous effectué | `rendez_vous` et `famille` complets |
+| `GET v1/appels/` `?canal=a,b&resultat=a,b&du=&au=&q=&id_contact=&sort=date\|nom&dir=&page=&limit=` | journal des échanges (appel, e-mail, message, rencontre) | `appels` lecture |
+| `POST v1/appels/` `{id_contact, canal?, sens?, date, heure, duree?, resultat?, date_rappel?, motif?, compte_rendu?, id_tache?, cle_saisie?}` | noter un échange ; `id_tache` : l'appel prévu qu'il solde | `appels` complet |
+| `PUT v1/appels/` `{id_interaction, …}` | corriger un échange (pas son canal) | `appels` complet |
+| `DELETE v1/appels/` `?id=` | supprimer un échange noté par erreur | son auteur ou un admin |
+| `GET v1/taches/` `?etat=ouvertes\|traitees&nature=tache\|appel&categorie=suivi\|gestion&a=moi&id_contact=&du=&au=&q=&page=&limit=` | tâches, avec `compteurs` (ouvertes, en retard, aujourd'hui, cette semaine, plus tard) et `aujourdhui` | `taches` lecture |
+| `POST v1/taches/` `{titre, date_echeance, id_contact?, nature?, categorie?, id_users_assigne?, cle_saisie?}` | créer une tâche, avec ou sans dossier | `taches` complet ; `suivi` avec `famille` |
+| `PUT`, `DELETE v1/taches/` | corriger ou supprimer une tâche manuelle ouverte (suppression : son auteur ou un admin) | `taches` complet |
+| `PUT v1/taches/report/` `{id_tache, date_echeance}` | reporter | `taches` complet |
+| `PUT v1/taches/attribution/` `{id_tache, id_users_assigne}` | attribuer (ou `null`) | `taches` complet |
+| `PUT v1/taches/cloture/` `{id_tache, traitee}` | marquer traitée (1) ou rouvrir (0) | `taches` complet |
+
+Chaque écriture renvoie `{suivi, contact, avertissements}` (plus `id_rdv`, `id_interaction`, `tache`, `proposition` selon le cas) : le bloc de suivi du dossier à jour et le dossier, dont le statut ou la prochaine action ont pu changer. `v1/listes/` sert aussi `equipe` (utilisateurs actifs : nom et profil).
+
+Règles tenues par l'API :
+
+- **Créneau** : `date_debut` ne se modifie jamais une fois fixé. Déplacer un rendez-vous crée une ligne chaînée (`id_rdv_precedent`, un seul successeur) ; l'ancien devient `reporte` s'il tenait encore, et reste `absent` ou `annule` sinon. Un déplacement envoyé deux fois rend le même successeur.
+- **Statut d'un rendez-vous** : écrit uniquement par `Rdv::changerStatut()` et `Rdv::replanifier()`, selon `Rdv::TRANSITIONS`. « Effectué » et « absent » ne se notent qu'une fois l'heure de début atteinte ; une issue se rétablit (erreur de saisie). Un rendez-vous ne se supprime pas.
+- **Avertissements** : un créneau passé ou qui en chevauche un autre est signalé dans `avertissements`, jamais refusé.
+- **Automatismes du dossier** (même transaction, origine `automatique`) : une demande fait passer un dossier « Prospect » ou « À relancer » en « RDV demandé » ; un créneau à venir fait passer un prospect en « RDV planifié ». Un client ne change pas de statut, et rien ne fait reculer un statut : après une annulation ou une absence sans autre rendez-vous, la réponse porte `proposition: "a_relancer"`, que le front propose sans l'appliquer.
+- **Échange** : un fait, à la minute, jamais dans le futur (dix minutes de tolérance sur l'horloge du poste). Le résultat (`abouti`, `sans_reponse`, `a_rappeler`) est propre aux appels ; « à rappeler » demande `date_rappel`. Un appel à passer n'est pas un échange : c'est une tâche de nature `appel`.
+- **Dernier échange** : `d_contact.date_derniere_interaction` ne s'écrit que par `Interaction::recalculerDerniere()` : le plus récent parmi les rendez-vous effectués et les échanges aboutis (un appel sans réponse ou à rappeler, une absence, ne comptent pas).
+- **Tâches** : `categorie` `suivi` (note interne, lue avec `famille`) ou `gestion` (lue de tous). Le profil `gestion` ne reçoit que les tâches de gestion dans `v1/taches/` ; d'une tâche de suivi d'un dossier, il ne voit que l'échéance (`lisible: false`). Reporter change l'échéance sur la même ligne (`nb_reports`).
+- **Tâches automatiques** : `echeance_retard`, `paiement_echoue`, `rdv_a_planifier`, `rdv_a_confirmer` (deux jours avant), `rdv_compte_rendu`, `appel_a_rappeler`. Sans intitulé : `alerte` et `objet` permettent de le composer. Elles ne sont créées et fermées que par `Tache::synchroniser()` : ouverte quand la cause apparaît, fermée (`sans_objet`) quand elle disparaît, rouverte si elle revient, jamais touchée une fois traitée à la main (`faite`). La clé unique `(alerte, objet_id)` interdit les doublons, même sous des lectures simultanées. Un dossier classé sans suite n'a plus d'alerte de suivi ; ses alertes de paiement restent.
+- **Synchronisation** : dans la transaction de chaque écriture de suivi, après chaque écriture financière, à la lecture du suivi d'un dossier, et au plus toutes les cinq minutes à la lecture de `v1/taches/` et de `v1/contacts/` (réservation dans `t_synchro`). Elle est silencieuse (ni audit, ni fil), n'écrit que s'il y a une différence, et ne dépend pas du profil qui lit. Aucune tâche planifiée n'est nécessaire ; `php script-cgi/synchroniser-taches.php` permet d'en brancher une.
+- **Fil du temps** : faits `rdv` (module `rendez_vous`), `echange` (module `appels`), `tache` (module `famille` pour une tâche de suivi, `taches` pour une tâche de gestion). L'objet est joint à la lecture (clé `suivi`), ses textes seulement avec le droit `famille`. Un échange se lit à sa date, un rendez-vous effectué ou manqué à son créneau. La suppression d'un échange ou d'une tâche retire ses faits du fil ; le journal d'audit en garde la trace.
+- **Double envoi** : `cle_saisie` sur les créations ; chaque écriture sur un dossier le verrouille (`Contact::verrouiller()`).
+
+`php script-cgi/verifier-suivi.php` (lecture seule, utilisable en production) contrôle le dernier échange de chaque dossier, les tâches automatiques (à lancer après une synchronisation) et les chaînes de rendez-vous ; code 1 au premier écart.
+
 ## Profils et droits
 
-Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes) : le profil `gestion` n'y accède jamais.
+Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion.
 
 ## Tests manuels
 

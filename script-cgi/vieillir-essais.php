@@ -7,6 +7,9 @@
 //              pour que les captures d'écran du front montrent un fil du temps sur plusieurs jours.
 //              Du plus récent au plus ancien : deux événements restent aujourd'hui, puis deux tous les trois jours.
 //              La note liée à un événement suit sa date ; le dossier prend la date de son premier événement.
+//              Les faits datés gardent leur date : un paiement à sa date de valeur, un échange au moment où il a eu lieu,
+//              un rendez-vous effectué ou manqué à son créneau ; ce qui précède un rendez-vous (prise, confirmation) est
+//              ramené avant lui.
 //              Ne touche à aucun autre dossier. Refusé en production ($_PROD = 1).
 // Usage:       php script-cgi/vieillir-essais.php
 //========================================================================
@@ -83,6 +86,39 @@ foreach ($dossiers as $d) {
         "UPDATE d_evenement e INNER JOIN v_vente v ON e.objet_type = 'vente' AND v.id_vente = e.objet_id
          SET e.date_evenement = TIMESTAMP(v.date_vente, TIME(e.date_evenement))
          WHERE e.id_contact = ? AND JSON_VALUE(e.details, '$.action') = 'creation'",
+        array($idc),
+        'i'
+    );
+
+    // Un échange se lit au moment où il a eu lieu ; un rendez-vous effectué ou manqué, à son créneau
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN i_interaction i ON e.objet_type = 'interaction' AND i.id_interaction = e.objet_id
+         SET e.date_evenement = i.date_interaction
+         WHERE e.id_contact = ? AND JSON_VALUE(e.details, '$.action') = 'creation'",
+        array($idc),
+        'i'
+    );
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
+         SET e.date_evenement = r.date_debut
+         WHERE e.id_contact = ? AND r.date_debut IS NOT NULL AND JSON_VALUE(e.details, '$.action') IN ('effectue', 'absent')",
+        array($idc),
+        'i'
+    );
+    // La prise d'un rendez-vous, sa confirmation ou son déplacement ne peuvent pas suivre le rendez-vous lui-même
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
+         SET e.date_evenement = r.date_debut - INTERVAL IF(JSON_VALUE(e.details, '$.action') = 'confirmation', 1, 4) DAY
+         WHERE e.id_contact = ? AND r.date_debut IS NOT NULL AND e.date_evenement >= r.date_debut
+           AND JSON_VALUE(e.details, '$.action') IN ('creation', 'planification', 'confirmation', 'report')",
+        array($idc),
+        'i'
+    );
+    // Le compte rendu s'écrit après le rendez-vous
+    $Mysql->execute(
+        "UPDATE d_evenement e INNER JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
+         SET e.date_evenement = LEAST(NOW(), r.date_fin + INTERVAL 20 MINUTE)
+         WHERE e.id_contact = ? AND r.date_fin IS NOT NULL AND JSON_VALUE(e.details, '$.action') = 'compte_rendu'",
         array($idc),
         'i'
     );

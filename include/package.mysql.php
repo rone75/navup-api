@@ -40,6 +40,11 @@ class Mysql
 
         $mysqli->set_charset("utf8mb4");
 
+        // NOW() et les dates par défaut suivent l'heure de Paris, comme date() côté PHP, quel que soit le fuseau du serveur.
+        // Le décalage est calculé par PHP : les fuseaux nommés ne sont pas toujours chargés dans MySQL.
+        $decalage = (new DateTime('now', new DateTimeZone('Europe/Paris')))->format('P');
+        $mysqli->query("SET time_zone = '" . $decalage . "'");
+
         return $mysqli;
     }
 

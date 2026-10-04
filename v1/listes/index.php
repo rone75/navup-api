@@ -23,7 +23,8 @@ $file_err = getcwd() . "/index.php";
 date_default_timezone_set('Europe/Paris');
 
 // Listes de référence (CDC §6, §7, §21) ################################
-// GET : origines des contacts, catégories de problématiques, offres (prix en centimes) et moyens de paiement actifs.
+// GET : origines des contacts, catégories de problématiques, offres (prix en centimes), moyens de paiement actifs,
+// et l'équipe (utilisateurs actifs : nom et profil seulement) pour attribuer une tâche ou un rendez-vous.
 // Le réglage de ces listes arrive à l'étape 7.
 
 if ($_SERVER['REQUEST_METHOD'] === "GET") {
@@ -37,6 +38,11 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
             return array('code' => $o->code, 'libelle' => $o->libelle, 'prix' => (int) $o->prix);
         }, $Mysql->fetchAll("SELECT code, libelle, prix FROM p_offre WHERE actif = 1 ORDER BY ordre, libelle")),
         'moyens' => $Mysql->fetchAll("SELECT code, libelle FROM p_moyen_paiement WHERE actif = 1 ORDER BY ordre, libelle"),
+        'equipe' => array_map(function ($u) {
+            $nom = trim($u->prenom . ' ' . $u->nom);
+
+            return array('id_users' => (int) $u->id_users, 'nom' => $nom !== '' ? $nom : $u->identifiant, 'profil' => $u->profil);
+        }, $Mysql->fetchAll("SELECT id_users, identifiant, prenom, nom, profil FROM u_users WHERE actif = 1 ORDER BY prenom, nom, identifiant")),
     ));
 }
 

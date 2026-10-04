@@ -7,6 +7,7 @@ include "../../include/package.response.php";
 include "../../include/package.user.php";
 include "../../include/package.saisie.php";
 include "../../include/package.contact.php";
+include "../../include/package.suivi.php";
 include "../../require/param.php";
 
 $H = new Header();
@@ -17,6 +18,7 @@ $CD = new ControleData();
 $U = new User();
 $S = new Saisie();
 $Contact = new Contact();
+$Tache = new Tache();
 
 // Connexion Mysql
 $Mysql = new Mysql();
@@ -37,16 +39,18 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $id = (is_string($_GET['id']) && ctype_digit($_GET['id'])) ? (int) $_GET['id'] : 0;
         list($user, $contact) = $Contact->exigerDossier($id, 'L');
 
-        list(, $derniers) = $Contact->chronologie($id, $Contact->modulesLisibles($user), 1, 0);
+        list(, $derniers) = $Contact->chronologie($id, $Contact->modulesLisibles($user), 1, 0, $U->can($user, 'famille', 'L'));
 
         $Response->success(array(
-            'contact' => $Contact->sortie($contact, $U->can($user, 'famille', 'L')),
+            'contact' => $Contact->sortie($contact),
             'dernier_evenement' => count($derniers) > 0 ? $derniers[0] : null,
         ));
     }
 
     // Liste ################################
     // GET ?groupe=prospects|clients&q=&statut=a,b&origine=&du=&au=&action=retard|prevue&categorie=&archive=1&sort=&dir=&page=&limit=
+    // La prochaine action d'un dossier est l'échéance de sa tâche ouverte la plus proche : action=retard retient
+    // les dossiers dont une tâche est due aujourd'hui ou en retard, action=prevue ceux qui ont une tâche ouverte.
 
     $user = $U->requireUser();
 
@@ -100,10 +104,16 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         }
     }
 
+    // Les tâches automatiques (échéance en retard, rendez-vous à confirmer…) sont remises à jour avant de filtrer,
+    // au plus toutes les cinq minutes
+    $Tache->synchroniserSiBesoin();
+
+    // Le jour vient de PHP, comme partout ailleurs
     if (isset($_GET['action']) && $_GET['action'] === 'retard') {
-        $where[] = "c.date_prochaine_action IS NOT NULL AND c.date_prochaine_action <= CURDATE()";
+        $where[] = "EXISTS (SELECT 1 FROM t_tache tr WHERE tr.id_contact = c.id_contact AND tr.date_cloture IS NULL AND tr.date_echeance <= ?)";
+        $params[] = date('Y-m-d');
     } elseif (isset($_GET['action']) && $_GET['action'] === 'prevue') {
-        $where[] = "c.date_prochaine_action IS NOT NULL";
+        $where[] = "EXISTS (SELECT 1 FROM t_tache tr WHERE tr.id_contact = c.id_contact AND tr.date_cloture IS NULL)";
     }
 
     // Filtrer par problématique révèle une donnée familiale : refus net sans le droit famille (jamais un filtre ignoré en silence)
@@ -124,7 +134,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
             'nom' => 'c.nom',
             'creation' => 'c.date_creation',
             'premier_contact' => array('c.date_premier_contact', true),
-            'action' => array('c.date_prochaine_action', true),
+            'action' => array(Contact::SQL_PROCHAINE_ACTION, true),
             'statut' => 'c.date_statut',
         ),
         'creation',
@@ -147,7 +157,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 }
 
 // Création ################################
-// POST {nom, prenom?, email?, telephone?, statut?, code_origine?, origine_precision?, date_premier_contact?, date_inscription?, date_prochaine_action?, prochaine_action?}
+// POST {nom, prenom?, email?, telephone?, statut?, code_origine?, origine_precision?, date_premier_contact?, date_inscription?}
 // Un e-mail déjà connu est refusé ; un téléphone déjà connu est signalé dans « doublons » sans bloquer.
 
 if ($_SERVER['REQUEST_METHOD'] === "POST") {
@@ -205,7 +215,7 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
     $SQL->commit();
 
     $Response->success(array(
-        'contact' => $Contact->sortie($Contact->charger($id), $U->can($user, 'famille', 'L')),
+        'contact' => $Contact->sortie($Contact->charger($id)),
         'doublons' => $doublons,
     ), 201);
 }
@@ -240,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
         $SQL->commit();
     }
 
-    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id), $U->can($user, 'famille', 'L'))));
+    $Response->success(array('contact' => $Contact->sortie($Contact->charger($id))));
 }
 
 $Response->methodNotAllowed();

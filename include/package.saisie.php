@@ -82,7 +82,7 @@ class Saisie
 
     /**
      * Lit et valide les champs d'un objet JSON selon une spécification.
-     * Types : str (une ligne), text (multiligne), int, bool, enum, email, tel, date, fk.
+     * Types : str (une ligne), text (multiligne), int, bool, enum, email, tel, date, heure (HH:MM), fk.
      * Clés d'une spécification : type, libelle, requis, max, min, valeurs (enum), defaut,
      * et pour fk : table, col, cast, where, where_params, where_lib.
      * $partiel = true : seuls les champs présents sont retournés (mise à jour).
@@ -195,6 +195,12 @@ class Saisie
                     }
                     break;
 
+                case 'heure':
+                    if (!is_string($v) || !preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $v)) {
+                        $Response->validationError("Le champ « $lib » doit être une heure HH:MM.");
+                    }
+                    break;
+
                 case 'fk':
                     $cast = $spec['cast'] ?? 'int';
                     if ($cast === 'int') {
@@ -227,6 +233,37 @@ class Saisie
         }
 
         return $data;
+    }
+
+    /** Clé de saisie d'un formulaire (UUID) : null si absente, 400 si mal formée. Un double envoi n'écrit qu'une fois. */
+    public function lireCle($R)
+    {
+        global $Response;
+
+        if (!is_object($R) || !isset($R->cle_saisie)) {
+            return null;
+        }
+        if (!is_string($R->cle_saisie) || !preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/', $R->cle_saisie)) {
+            $Response->validationError("Clé de saisie invalide.");
+        }
+
+        return $R->cle_saisie;
+    }
+
+    /** Date AAAA-MM-JJ lue dans $_GET, ou null si absente ; 400 si elle est mal formée. */
+    public function dateFiltre($cle)
+    {
+        global $Response;
+
+        if (!isset($_GET[$cle]) || !is_string($_GET[$cle]) || $_GET[$cle] === '') {
+            return null;
+        }
+        $d = DateTime::createFromFormat('Y-m-d', $_GET[$cle]);
+        if ($d === false || $d->format('Y-m-d') !== $_GET[$cle]) {
+            $Response->validationError("Date invalide (format AAAA-MM-JJ) : $cle");
+        }
+
+        return $_GET[$cle];
     }
 
     /** Refuse (400) si une valeur est déjà prise dans une colonne unique (hors la ligne exclue). */

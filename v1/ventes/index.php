@@ -8,6 +8,7 @@ include "../../include/package.user.php";
 include "../../include/package.saisie.php";
 include "../../include/package.contact.php";
 include "../../include/package.vente.php";
+include "../../include/package.suivi.php";
 include "../../require/param.php";
 
 $H = new Header();
@@ -19,6 +20,7 @@ $U = new User();
 $S = new Saisie();
 $Contact = new Contact();
 $Vente = new Vente();
+$Tache = new Tache();
 
 // Connexion Mysql
 $Mysql = new Mysql();
@@ -204,10 +206,13 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
 
     $res = $Vente->creer($contact, $data, $echeances, $encaissement, $cle, (int) $user->id_users);
 
+    // Les tâches de relance du dossier suivent l'écriture (échéance en retard, paiement échoué)
+    $Tache->synchroniser($idc);
+
     $Response->success(array(
         'id_vente' => $res['id_vente'],
         'ventes' => $Vente->blocDossier($idc, $user),
-        'contact' => $Contact->sortie($Contact->charger($idc), $U->can($user, 'famille', 'L')),
+        'contact' => $Contact->sortie($Contact->charger($idc)),
         'avertissements' => $res['avertissements'],
     ), $res['deja'] ? 200 : 201);
 }
@@ -229,7 +234,7 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
     $idc = (int) $vente->id_contact;
     $Response->success(array(
         'ventes' => $Vente->blocDossier($idc, $user),
-        'contact' => $Contact->sortie($Contact->charger($idc), $U->can($user, 'famille', 'L')),
+        'contact' => $Contact->sortie($Contact->charger($idc)),
         'avertissements' => array(),
     ));
 }
