@@ -4,6 +4,8 @@ include "../../include/package.header.php";
 include "../../include/package.mysql.php";
 include "../../include/package.data.php";
 include "../../include/package.response.php";
+include "../../include/package.xlsx.php";
+include "../../include/package.export.php";
 include "../../include/package.user.php";
 include "../../require/param.php";
 
@@ -72,6 +74,11 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     $page = (isset($_GET['page']) && is_numeric($_GET['page'])) ? max(1, (int) $_GET['page']) : 1;
     $limit = (isset($_GET['limit']) && is_numeric($_GET['limit'])) ? min(200, max(1, (int) $_GET['limit'])) : 50;
     $offset = ($page - 1) * $limit;
+    // &format=xlsx : tout le journal filtré, en classeur (administrateur seul : ce journal ne s'ouvre qu'à lui)
+    if (Export::demande()) {
+        Export::exiger($admin);
+        list($page, $limit, $offset) = array(1, Export::MAX_LIGNES + 1, 0);
+    }
 
     $from = " FROM u_audit a LEFT JOIN u_users u ON u.id_users = a.id_users"
         . (count($where) > 0 ? " WHERE " . implode(" AND ", $where) : "");
@@ -108,6 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $actions[] = $r->action;
     }
 
+    Export::siDemande('audit', $admin, $audit, $total);
     $Response->success(array(
         'audit' => $audit,
         'total' => $total,

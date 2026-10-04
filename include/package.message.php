@@ -12,6 +12,8 @@
 // Author:      Corre Erwan (corre_erwan@yahoo.fr)
 //========================================================================
 
+require_once __DIR__ . '/package.modeles.php';
+
 class Message
 {
     // Modèles : libellé (affiché dans l'outil) et module dont le droit de lecture ouvre le corps du message.
@@ -103,10 +105,29 @@ class Message
     // MODÈLES ########################################################
 
     /**
-     * Compose un message : array(sujet, corps). $d : données du fait, préparées par l'appelant.
-     * Texte brut, une idée par paragraphe. Aucune donnée saisie par un inconnu n'entre dans un sujet.
+     * Compose un message : array(sujet, corps, version). Le texte est la version active du modèle (Modeles::actif :
+     * celle que l'administrateur a enregistrée, sinon le gabarit d'origine), ses marques remplacées par les valeurs du
+     * fait ($d, préparées par l'appelant). L'avis interne au responsable garde sa composition fixe.
      */
     private function composer($modele, $contact, $d)
+    {
+        if (!isset(Modeles::ORIGINES[$modele])) {
+            list($sujet, $corps) = $this->composerOrigine($modele, $contact, $d);
+
+            return array($sujet, $corps, 0);
+        }
+        $gabarit = Modeles::actif($modele);
+        list($sujet, $corps) = Modeles::rendre($gabarit, Modeles::valeurs($modele, $contact, $d));
+
+        return array($sujet, $corps, $gabarit['version']);
+    }
+
+    /**
+     * Composition d'avant l'étape 7b, gardée telle quelle : elle compose l'avis interne au responsable, et sert de
+     * référence à script-cgi/verifier-emails.php, qui prouve que chaque gabarit d'origine rend le même e-mail.
+     * Texte brut, une idée par paragraphe. Aucune donnée saisie par un inconnu n'entre dans un sujet.
+     */
+    public function composerOrigine($modele, $contact, $d)
     {
         global $_LIEN_PAIEMENT_JOURS;
 
@@ -278,14 +299,15 @@ class Message
         if ($contact->email === null || filter_var($contact->email, FILTER_VALIDATE_EMAIL) === false) {
             return null;
         }
-        list($sujet, $corps) = $this->composer($modele, $contact, $donnees);
+        list($sujet, $corps, $version) = $this->composer($modele, $contact, $donnees);
 
         $nb = $Mysql->execute(
-            "INSERT IGNORE INTO m_message (id_contact, modele, module, destinataire, sujet, corps, objet_type, objet_id, cle, origine, id_users)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT IGNORE INTO m_message (id_contact, modele, version_modele, module, destinataire, sujet, corps, objet_type, objet_id, cle, origine, id_users)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             array(
                 (int) $contact->id_contact,
                 $modele,
+                (int) $version,
                 self::MODELES[$modele]['module'],
                 $contact->email,
                 mb_substr($sujet, 0, 200),
@@ -296,7 +318,7 @@ class Message
                 $options['origine'] ?? 'automatique',
                 isset($options['id_users']) ? (int) $options['id_users'] : null,
             ),
-            'issssssissi'
+            'isisssssissi'
         );
 
         return $nb === 1 ? $Mysql->lastId() : null;

@@ -349,6 +349,20 @@ Le parent choisit lui-même un créneau : un visiteur sur la page publique (rend
 - **Flux d'agenda** : rendez-vous que l'utilisateur mène, de 30 jours en arrière à 6 mois en avant ; titre « Découverte · Sophie M. », ni nom complet, ni téléphone, ni note. Un calendrier le relit quelques fois par jour.
 - `php script-cgi/essai-rdv.php` : le scénario complet, contrôlé, sans rien envoyer (`--montrer` : l'e-mail et son invitation tels qu'ils partiraient).
 
+## Endpoints de l'étape 7a : statistiques, exports, rapport
+
+| Endpoint | Rôle | Droit |
+|---|---|---|
+| `GET v1/statistiques/?periode=jour\|7j\|mois\|trimestre\|annee\|perso&du=&au=` | statistiques de la période et de la précédente de même durée : nouveaux dossiers, conversion, finances (panier moyen, modalités, moyens de paiement), reste à encaisser, origines, rendez-vous, problématiques agrégées, programme, évolution sur 12 mois | `statistiques`, puis un bloc par droit |
+| `GET v1/statistiques/?…&format=xlsx` | les mêmes chiffres en classeur, une feuille par section | `statistiques` et `exports` |
+| `GET v1/statistiques/rapport/?…` | rapport PDF de la période (`application/pdf`) | `statistiques` et `exports` |
+| `GET <liste>?…&format=xlsx` | la liste avec ses filtres, toutes pages (20 000 lignes au plus), en classeur : `v1/contacts/`, `v1/ventes/`, `v1/paiements/`, `v1/paiements/echeances/`, `v1/taches/`, `v1/rendez-vous/` (période de l'agenda), `v1/audit/` (administrateur) | droit de la liste et `exports` |
+| `GET v1/paiements/?type=encaissement,remboursement,impaye&du=&au=&modele=comptable&format=xlsx` | export comptable : écritures de la période (encaissé signé, remboursé, frais, moyen, référence, vente, client) et une feuille de totaux égale aux totaux du journal | `paiements` et `exports` |
+
+- Le classeur et le PDF sont fabriqués sans librairie ni outil installé (`ZipArchive` de PHP, générateur PDF maison) ; rien n'est gardé sur le serveur.
+- Chaque export, rapport compris, est noté au journal d'audit (action `export`).
+- `php script-cgi/verifier-statistiques.php` recoupe les statistiques sur chaque période.
+
 ## Profils et droits
 
 Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion. Le module `formation` (étape 6a) : l'administrateur écrit, `accompagnement` lit, `gestion` n'y accède pas.

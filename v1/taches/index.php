@@ -4,6 +4,8 @@ include "../../include/package.header.php";
 include "../../include/package.mysql.php";
 include "../../include/package.data.php";
 include "../../include/package.response.php";
+include "../../include/package.xlsx.php";
+include "../../include/package.export.php";
 include "../../include/package.user.php";
 include "../../include/package.saisie.php";
 include "../../include/package.contact.php";
@@ -106,7 +108,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
     $sqlWhere = " WHERE " . implode(" AND ", $where);
     $ordre = $traitees ? "t.date_cloture DESC, t.id_tache DESC" : "t.date_echeance, t.id_tache";
-    list($page, $limit, $offset) = $S->pagination();
+    list($page, $limit, $offset) = Export::pagination($user);
 
     $total = (int) $Mysql->fetchOne("SELECT COUNT(*) AS nb FROM t_tache t LEFT JOIN d_contact c ON c.id_contact = t.id_contact" . $sqlWhere, $params)->nb;
     $taches = array();
@@ -117,6 +119,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $taches[] = $Tache->sortie($row, true, $aujourdhui);
     }
 
+    Export::siDemande('taches', $user, $taches, $total);
     $Response->success(array(
         'taches' => $taches,
         'total' => $total,

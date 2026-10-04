@@ -4,6 +4,8 @@ include "../../include/package.header.php";
 include "../../include/package.mysql.php";
 include "../../include/package.data.php";
 include "../../include/package.response.php";
+include "../../include/package.xlsx.php";
+include "../../include/package.export.php";
 include "../../include/package.user.php";
 include "../../include/package.saisie.php";
 include "../../include/package.contact.php";
@@ -49,6 +51,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
     // Liste ################################
     // GET ?groupe=prospects|clients&q=&statut=a,b&origine=&programme=en_cours|fin_proche|termine&du=&au=&action=retard|prevue&categorie=&archive=1&sort=&dir=&page=&limit=
+    // &format=xlsx : la même liste, toutes pages, en classeur Excel (droit exports ; package.export.php)
     // La prochaine action d'un dossier est l'échéance de sa tâche ouverte la plus proche : action=retard retient
     // les dossiers dont une tâche est due aujourd'hui ou en retard, action=prevue ceux qui ont une tâche ouverte.
 
@@ -150,7 +153,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         'creation',
         'c.prenom, c.id_contact'
     );
-    list($page, $limit, $offset) = $S->pagination();
+    list($page, $limit, $offset) = Export::pagination($user);
 
     $total = (int) $Mysql->fetchOne("SELECT COUNT(*) AS nb FROM d_contact c" . $sqlWhere, $params)->nb;
     $rows = $Mysql->fetchAll(
@@ -163,6 +166,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $contacts[] = $Contact->sortie($row);
     }
 
+    Export::siDemande('dossiers', $user, $contacts, $total);
     $Response->success(array('contacts' => $contacts, 'total' => $total, 'page' => $page, 'limit' => $limit));
 }
 

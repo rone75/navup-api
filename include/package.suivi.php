@@ -1473,7 +1473,9 @@ class Tache
     const CATEGORIES = array('suivi', 'gestion');
     const NATURES = array('tache', 'appel');
 
-    // Tâches automatiques (CDC §14) : catégorie, nature et objet qui les cause. Les délais deviennent réglables à l'étape 7.
+    // Tâches automatiques (CDC §14) : catégorie, nature et objet qui les cause. Chacune s'allume ou s'éteint
+    // ($_ALERTES_ACTIVES) et ses délais se règlent dans l'outil (package.reglage.php) ; une alerte éteinte ferme ses
+    // tâches ouvertes « sans objet », une alerte rallumée les rouvre.
     const ALERTES = array(
         'echeance_retard' => array('categorie' => 'gestion', 'nature' => 'tache', 'objet' => 'echeance'),
         'paiement_echoue' => array('categorie' => 'gestion', 'nature' => 'tache', 'objet' => 'paiement'),
@@ -1482,13 +1484,25 @@ class Tache
         'rdv_compte_rendu' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'rdv'),
         'appel_a_rappeler' => array('categorie' => 'suivi', 'nature' => 'appel', 'objet' => 'interaction'),
         'programme_fin_proche' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'compte'),
+        // Étape 7b. Prospect sans suivi : l'objet est le dernier fait de suivi du dossier ; un nouveau fait clôt le cycle
+        'prospect_sans_suivi' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'evenement'),
+        'information_manquante' => array('categorie' => 'gestion', 'nature' => 'tache', 'objet' => 'contact'),
+        'acces_fin_proche' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'compte'),
+        // Prendre des nouvelles d'un parent en programme : interne, une fois par programme, jamais montré au parent
+        'programme_inactif' => array('categorie' => 'suivi', 'nature' => 'appel', 'objet' => 'compte'),
     );
 
-    // Un rendez-vous à confirmer se rappelle deux jours avant
-    const JOURS_AVANT_RDV = 2;
+    /** Délai réglable (require/param.php, puis package.reglage.php), en jours. */
+    private static function jours($reglage, $defaut)
+    {
+        return isset($GLOBALS[$reglage]) ? (int) $GLOBALS[$reglage] : $defaut;
+    }
 
-    // Une fin de programme reste à traiter pendant ces jours après la fin (bilan, clôture)
-    const JOURS_APRES_PROGRAMME = 14;
+    /** L'alerte est-elle allumée ? */
+    public static function active($alerte)
+    {
+        return !isset($GLOBALS['_ALERTES_ACTIVES'][$alerte]) || $GLOBALS['_ALERTES_ACTIVES'][$alerte] !== false;
+    }
 
     // Délai minimal entre deux synchronisations générales, en minutes
     const INTERVALLE_SYNCHRO = 5;
@@ -1500,6 +1514,7 @@ class Tache
         ua.identifiant AS assigne_identifiant, ua.prenom AS assigne_prenom, ua.nom AS assigne_nom,
         uc.identifiant AS auteur_identifiant, uc.prenom AS auteur_prenom, uc.nom AS auteur_nom,
         uf.identifiant AS cloture_identifiant, uf.prenom AS cloture_prenom, uf.nom AS cloture_nom,
+        ev.date_evenement AS o_evt_date, ac.date_fin_acces AS o_cpt_date_fin_acces,
         e.id_vente AS o_ech_id_vente, e.date_prevue AS o_ech_date_prevue, e.montant AS o_ech_montant, e.montant_paye AS o_ech_montant_paye,
         p.id_vente AS o_pai_id_vente, p.type AS o_pai_type, p.montant AS o_pai_montant, p.date_paiement AS o_pai_date,
         r.type AS o_rdv_type, r.statut AS o_rdv_statut, r.date_debut AS o_rdv_date_debut,
@@ -1515,7 +1530,8 @@ class Tache
         LEFT JOIN v_paiement p ON t.objet_type = 'paiement' AND p.id_paiement = t.objet_id
         LEFT JOIN r_rdv r ON t.objet_type = 'rdv' AND r.id_rdv = t.objet_id
         LEFT JOIN i_interaction i ON t.objet_type = 'interaction' AND i.id_interaction = t.objet_id
-        LEFT JOIN a_compte ac ON t.objet_type = 'compte' AND ac.id_compte = t.objet_id";
+        LEFT JOIN a_compte ac ON t.objet_type = 'compte' AND ac.id_compte = t.objet_id
+        LEFT JOIN d_evenement ev ON t.objet_type = 'evenement' AND ev.id_evenement = t.objet_id";
 
     // LECTURE ########################################################
 
@@ -1617,7 +1633,10 @@ class Tache
             return array('id_interaction' => (int) $t->objet_id, 'date_interaction' => $t->o_int_date);
         }
         if ($t->objet_type === 'compte' && $t->o_cpt_date_fin !== null) {
-            return array('id_compte' => (int) $t->objet_id, 'date_fin' => $t->o_cpt_date_fin);
+            return array('id_compte' => (int) $t->objet_id, 'date_fin' => $t->o_cpt_date_fin, 'date_fin_acces' => $t->o_cpt_date_fin_acces);
+        }
+        if ($t->objet_type === 'evenement' && $t->o_evt_date !== null) {
+            return array('id_evenement' => (int) $t->objet_id, 'date_fait' => substr($t->o_evt_date, 0, 10));
         }
 
         return null;
@@ -1984,7 +2003,7 @@ class Tache
             case 'rdv_a_confirmer':
                 // Rendez-vous à venir, non confirmé ; dû deux jours avant, au plus tôt le jour où il a été pris
                 $sql = "SELECT r.id_rdv AS objet_id, r.id_contact,
-                               GREATEST(DATE(r.date_statut), DATE(r.date_debut) - INTERVAL " . self::JOURS_AVANT_RDV . " DAY) AS date_echeance,
+                               GREATEST(DATE(r.date_statut), DATE(r.date_debut) - INTERVAL " . self::jours('_TACHE_JOURS_AVANT_RDV', 2) . " DAY) AS date_echeance,
                                r.id_users_responsable AS id_users
                         FROM r_rdv r INNER JOIN d_contact c ON c.id_contact = r.id_contact
                         WHERE r.statut = 'a_confirmer' AND r.date_fin >= ? AND c.date_archivage IS NULL";
@@ -2021,7 +2040,64 @@ class Tache
                 $sql = "SELECT a.id_compte AS objet_id, a.id_contact, a.date_fin - INTERVAL $proche DAY AS date_echeance, NULL AS id_users
                         FROM a_compte a INNER JOIN d_contact c ON c.id_contact = a.id_contact
                         WHERE a.etat = 'actif' AND a.date_fin <= DATE_ADD(?, INTERVAL $proche DAY)
-                          AND a.date_fin >= DATE_SUB(?, INTERVAL " . self::JOURS_APRES_PROGRAMME . " DAY) AND c.date_archivage IS NULL";
+                          AND a.date_fin >= DATE_SUB(?, INTERVAL " . self::jours('_TACHE_JOURS_APRES_PROGRAMME', 14) . " DAY) AND c.date_archivage IS NULL";
+                $params[] = $jour;
+                $params[] = $jour;
+                $dossier = 'a.id_contact';
+                break;
+
+            case 'prospect_sans_suivi':
+                // Prospect non classé, sans rendez-vous à venir ni demande en attente, dont le dernier fait de suivi
+                // (création, échange, rendez-vous, note) date de plus de N jours. L'objet est ce fait : un nouveau fait
+                // ferme la tâche (« sans objet »), un nouveau silence en ouvre une autre. Due N jours après ce fait.
+                $n = self::jours('_PROSPECT_SANS_SUIVI_JOURS', 14);
+                $prospects = "'" . implode("', '", Contact::GROUPES['prospects']) . "'";
+                $sql = "SELECT d.id_fait AS objet_id, c.id_contact, DATE(ev.date_evenement) + INTERVAL $n DAY AS date_echeance, NULL AS id_users
+                        FROM d_contact c
+                        INNER JOIN (SELECT id_contact, MAX(id_evenement) AS id_fait FROM d_evenement
+                                    WHERE type IN ('creation', 'echange', 'rdv', 'note') GROUP BY id_contact) d ON d.id_contact = c.id_contact
+                        INNER JOIN d_evenement ev ON ev.id_evenement = d.id_fait
+                        WHERE c.statut IN ($prospects) AND c.date_archivage IS NULL
+                          AND ev.date_evenement < ? - INTERVAL $n DAY
+                          AND NOT EXISTS (SELECT 1 FROM r_rdv r WHERE r.id_contact = c.id_contact
+                                          AND (r.statut = 'demande' OR (r.statut IN ('a_confirmer', 'confirme') AND r.date_fin >= ?)))";
+                $params[] = $maintenant;
+                $params[] = $maintenant;
+                $dossier = 'c.id_contact';
+                break;
+
+            case 'information_manquante':
+                // Dossier non classé sans moyen de joindre le parent, ou sans origine ; dû le lendemain de sa création
+                $sql = "SELECT c.id_contact AS objet_id, c.id_contact, DATE(c.date_creation) + INTERVAL 1 DAY AS date_echeance, NULL AS id_users
+                        FROM d_contact c
+                        WHERE c.date_archivage IS NULL
+                          AND ((COALESCE(c.email, '') = '' AND COALESCE(c.telephone, '') = '') OR c.code_origine IS NULL)";
+                $dossier = 'c.id_contact';
+                break;
+
+            case 'acces_fin_proche':
+                // L'accès du parent à son espace se ferme dans N jours (date de fin d'accès, pas de fin du programme)
+                $n = self::jours('_ACCES_FIN_PROCHE_JOURS', 7);
+                $sql = "SELECT a.id_compte AS objet_id, a.id_contact, a.date_fin_acces - INTERVAL $n DAY AS date_echeance, NULL AS id_users
+                        FROM a_compte a INNER JOIN d_contact c ON c.id_contact = a.id_contact
+                        WHERE a.etat = 'actif' AND a.date_fin_acces >= ? AND a.date_fin_acces <= DATE_ADD(?, INTERVAL $n DAY)
+                          AND c.date_archivage IS NULL";
+                $params[] = $jour;
+                $params[] = $jour;
+                $dossier = 'a.id_contact';
+                break;
+
+            case 'programme_inactif':
+                // Client en programme depuis au moins N jours, qui n'a marqué aucun sujet « terminé » depuis N jours
+                // (geste du parent dans son espace, jamais déduit). Une seule fois par programme : traitée, elle ne revient pas.
+                $n = self::jours('_PROGRAMME_INACTIF_JOURS', 21);
+                $sql = "SELECT a.id_compte AS objet_id, a.id_contact,
+                               GREATEST(a.date_debut, COALESCE((SELECT DATE(MAX(p.date_termine)) FROM e_progression p WHERE p.id_compte = a.id_compte), a.date_debut)) + INTERVAL $n DAY AS date_echeance,
+                               NULL AS id_users
+                        FROM a_compte a INNER JOIN d_contact c ON c.id_contact = a.id_contact
+                        WHERE a.etat = 'actif' AND a.date_debut <= ? - INTERVAL $n DAY AND a.date_fin >= ? AND c.date_archivage IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM e_progression p WHERE p.id_compte = a.id_compte AND p.date_termine >= ? - INTERVAL $n DAY)";
+                $params[] = $jour;
                 $params[] = $jour;
                 $params[] = $jour;
                 $dossier = 'a.id_contact';
@@ -2063,7 +2139,8 @@ class Tache
         $differences = array();
 
         foreach (self::ALERTES as $alerte => $def) {
-            $causes = $this->causes($alerte, $id_contact, $maintenant);
+            // Une alerte éteinte n'a plus de cause : ses tâches ouvertes se ferment « sans objet »
+            $causes = self::active($alerte) ? $this->causes($alerte, $id_contact, $maintenant) : array();
 
             // Tâches de cette alerte encore ouvertes, ou dont l'objet a une cause active
             $sql = "SELECT id_tache, objet_id, date_echeance, nb_reports, date_cloture, cloture FROM t_tache WHERE alerte = ?";

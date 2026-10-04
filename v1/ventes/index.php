@@ -4,6 +4,8 @@ include "../../include/package.header.php";
 include "../../include/package.mysql.php";
 include "../../include/package.data.php";
 include "../../include/package.response.php";
+include "../../include/package.xlsx.php";
+include "../../include/package.export.php";
 include "../../include/package.user.php";
 include "../../include/package.saisie.php";
 include "../../include/package.contact.php";
@@ -140,7 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         'date',
         'v.id_vente DESC'
     );
-    list($page, $limit, $offset) = $S->pagination();
+    list($page, $limit, $offset) = Export::pagination($user);
 
     $t = $Vente->totauxVentes(implode(" AND ", $where), $params);
     $rows = $Mysql->fetchAll(
@@ -153,6 +155,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $ventes[] = $Vente->sortie($row);
     }
 
+    Export::siDemande('ventes', $user, $ventes, $t['nb']);
     $Response->success(array(
         'ventes' => $ventes,
         'total' => $t['nb'],

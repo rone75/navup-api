@@ -39,6 +39,18 @@ $_LIMITE_PAIEMENT = array(30, 15);
 // Programme
 $_PROGRAMME_FIN_PROCHE_JOURS = 7;          // alerte « fin de programme proche »
 
+// Tâches automatiques (alertes). Valeurs par défaut : l'administrateur les règle dans l'outil (package.reglage.php)
+$_ALERTES_ACTIVES = array(
+    'echeance_retard' => true, 'paiement_echoue' => true, 'rdv_a_planifier' => true, 'rdv_a_confirmer' => true,
+    'rdv_compte_rendu' => true, 'appel_a_rappeler' => true, 'programme_fin_proche' => true,
+    'prospect_sans_suivi' => true, 'information_manquante' => true, 'acces_fin_proche' => true, 'programme_inactif' => true,
+);
+$_TACHE_JOURS_AVANT_RDV = 2;               // un rendez-vous à confirmer se rappelle ce nombre de jours avant
+$_TACHE_JOURS_APRES_PROGRAMME = 14;        // une fin de programme reste à traiter ce nombre de jours après la fin
+$_PROSPECT_SANS_SUIVI_JOURS = 14;          // prospect sans échange, rendez-vous ni note depuis ce nombre de jours
+$_ACCES_FIN_PROCHE_JOURS = 7;              // l'accès d'un parent à son espace se ferme dans ce nombre de jours
+$_PROGRAMME_INACTIF_JOURS = 21;            // client en programme qui n'a terminé aucun sujet depuis ce nombre de jours
+
 // Appli des parents (navup-parent-api lit la base : ce qui suit s'écrit dans a_compte et a_jeton, elle n'a aucun réglage à recopier)
 $_ACCES_APRES_FIN_JOURS = 30;              // les contenus restent consultables ce nombre de jours après la fin du programme
 $_LIEN_ACCES_CREATION_JOURS = 7;           // lien d'invitation : création du mot de passe
