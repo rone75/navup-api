@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS d_contact (
   code_origine              VARCHAR(30)  NULL DEFAULT NULL,
   origine_precision         VARCHAR(150) NULL DEFAULT NULL,
   date_premier_contact      DATE NULL DEFAULT NULL,
-  date_inscription          DATE NULL DEFAULT NULL COMMENT 'inscription au programme (posée par le formulaire public à l''étape 6)',
+  date_inscription          DATE NULL DEFAULT NULL COMMENT 'inscription au programme (posée au premier encaissement si elle est vide, étape 6a)',
   date_prochaine_action     DATE NULL DEFAULT NULL,
   prochaine_action          VARCHAR(255) NULL DEFAULT NULL COMMENT 'texte interne, servi avec le droit famille ; remplacé par les tâches à l''étape 4',
   date_derniere_interaction DATETIME NULL DEFAULT NULL COMMENT 'dernier échange avec le parent, écrit par les appels et rendez-vous (étape 4)',

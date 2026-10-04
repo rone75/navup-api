@@ -5,9 +5,12 @@
 // Description: dossiers (prospects et clients) : cycle de vie, droits par dossier, recherche,
 //              données familiales (déclaration, enfants, problématiques, notes), chronologie, verrou d'écriture.
 //              Requiert package.saisie.php ($S), package.user.php ($U), package.mysql.php ($Mysql).
+//              Inclut package.compte.php : un dossier se sert toujours avec son programme (compte NavUp Academy).
 // Created:     2026-10-03
 // Author:      Corre Erwan (corre_erwan@yahoo.fr)
 //========================================================================
+
+include_once __DIR__ . "/package.compte.php";
 
 class Contact
 {
@@ -28,14 +31,15 @@ class Contact
     // La date est visible de tous les profils ; l'intitulé de la tâche se lit par v1/contacts/suivi/, selon les droits.
     const SQL_PROCHAINE_ACTION = "(SELECT MIN(ta.date_echeance) FROM t_tache ta WHERE ta.id_contact = c.id_contact AND ta.date_cloture IS NULL)";
 
-    // Colonnes servies par la liste, la recherche et la fiche : identité et suivi uniquement.
+    // Colonnes servies par la liste, la recherche et la fiche : identité, suivi et programme (compte NavUp Academy) uniquement.
     // Jamais de c.* : une colonne ajoutée à d_contact ne doit pas sortir par accident.
     const COLONNES = "c.id_contact, c.prenom, c.nom, c.email, c.telephone, c.statut, c.date_statut, c.code_origine,
             o.libelle AS origine, c.origine_precision, c.date_premier_contact, c.date_inscription,
             " . self::SQL_PROCHAINE_ACTION . " AS date_prochaine_action,
-            c.date_derniere_interaction, c.date_archivage, c.date_creation, c.date_modif";
+            c.date_derniere_interaction, c.date_archivage, c.date_creation, c.date_modif,
+            " . Compte::COLONNES_DOSSIER;
 
-    const SQL_FROM = " FROM d_contact c LEFT JOIN p_origine o ON o.code = c.code_origine";
+    const SQL_FROM = " FROM d_contact c LEFT JOIN p_origine o ON o.code = c.code_origine LEFT JOIN a_compte a ON a.id_contact = c.id_contact";
 
     // Jour d'arrivée d'un dossier : son premier contact, à défaut sa création. Même expression pour le filtre
     // de période des listes et pour les « nouveaux dossiers » du tableau de bord.
@@ -184,6 +188,8 @@ class Contact
             'date_archivage' => $row->date_archivage,
             'date_creation' => $row->date_creation,
             'date_modif' => $row->date_modif,
+            // Programme du compte NavUp Academy (état, semaine en cours) : calculé ici, le front l'affiche ; null sans compte
+            'programme' => Compte::programmeDuDossier($row),
         );
     }
 
@@ -346,6 +352,52 @@ class Contact
             ),
             'isssissis'
         );
+    }
+
+    /**
+     * Seul point de création d'un dossier : la saisie dans l'outil et l'achat en ligne passent tous deux par ici.
+     * $data : champs de specContact(), déjà validés ; $details : codes joints au fait de création (canal d'arrivée).
+     * Sans transaction : l'appelant la tient. Retourne l'identifiant du dossier.
+     */
+    public function creer($data, $statut, $id_users, $origine = 'utilisateur', $details = array())
+    {
+        global $S;
+
+        $data['statut'] = $statut;
+        $data['id_users_createur'] = $id_users;
+        if (empty($data['date_premier_contact'])) {
+            $data['date_premier_contact'] = date('Y-m-d');
+        }
+        $id = $S->inserer('d_contact', $data);
+        $codes = array_merge(array('statut' => $statut), $details);
+        $this->tracer($id, $id_users, 'contact_create', $codes, array('type' => 'creation', 'details' => $codes, 'origine' => $origine));
+
+        return $id;
+    }
+
+    /**
+     * Seul point d'écriture de d_contact.date_archivage : classe un dossier sans suite, ou le rouvre (un parent classé
+     * qui achète en ligne est rouvert, avec la mention « automatique »). Sans transaction : l'appelant la tient,
+     * et synchronise les tâches du dossier. Retourne false si le dossier était déjà dans cet état.
+     */
+    public function archiver($contact, $archive, $id_users, $origine = 'utilisateur')
+    {
+        global $Mysql;
+
+        if (($contact->date_archivage !== null) === (bool) $archive) {
+            return false;
+        }
+        $id = (int) $contact->id_contact;
+        $Mysql->execute(
+            "UPDATE d_contact SET date_archivage = " . ($archive ? "NOW()" : "NULL") . ", date_modif = NOW() WHERE id_contact = ?",
+            array($id),
+            'i'
+        );
+        $this->tracer($id, $id_users, $archive ? 'contact_archive' : 'contact_restore', null, array(
+            'type' => 'archivage', 'details' => array('archive' => $archive ? 1 : 0), 'origine' => $origine,
+        ));
+
+        return true;
     }
 
     /**

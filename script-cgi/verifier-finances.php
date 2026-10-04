@@ -9,7 +9,9 @@
 //              - les caches : statut, modalité, part payée et date de solde de chaque échéance ;
 //              - la somme des échéances actives d'une vente en cours, égale à son total ;
 //              - aucun trop-perçu, aucun remboursement au-delà de l'encaissé, aucune écriture avant la vente ;
-//              - vendu = encaissé + reste dû, vente par vente.
+//              - vendu = encaissé + reste dû, vente par vente ;
+//              - paiement en ligne : écriture « stripe » si et seulement si elle porte un identifiant Stripe, un
+//                encaissement par prélèvement réussi, aucun prélèvement sans issue, une page de paiement ouverte au plus.
 //              Sort avec le code 1 au premier écart, 0 si tout est cohérent.
 // Usage:       php script-cgi/verifier-finances.php
 //========================================================================
@@ -91,6 +93,41 @@ foreach ($Mysql->fetchAll(
        AND (o.id_paiement IS NULL OR o.type <> 'encaissement' OR o.montant <> i.montant OR o.id_vente <> i.id_vente OR o.date_annulation IS NOT NULL)"
 ) as $i) {
     $ecarts[] = Vente::reference($i->id_vente) . " : l'impayé n° {$i->id_paiement} ne correspond à aucun encaissement valide de même montant";
+}
+
+// Paiement en ligne : une écriture vient de Stripe si et seulement si elle porte son identifiant Stripe
+foreach ($Mysql->fetchAll("SELECT id_paiement, id_vente, source FROM v_paiement WHERE (source = 'stripe') <> (stripe_id IS NOT NULL)") as $p) {
+    $ecarts[] = Vente::reference($p->id_vente) . " : l'écriture n° {$p->id_paiement} (source « {$p->source} ») " . ($p->source === 'stripe' ? "n'a pas d'identifiant Stripe" : "porte un identifiant Stripe");
+}
+
+// Un prélèvement réussi a exactement un encaissement ; un prélèvement refusé n'en a aucun
+foreach ($Mysql->fetchAll(
+    "SELECT pr.id_prelevement, pr.id_vente, pr.etat,
+            (SELECT COUNT(*) FROM v_paiement p WHERE p.stripe_payment_intent_id = pr.stripe_payment_intent_id AND p.type = 'encaissement' AND p.date_annulation IS NULL) AS encaissements
+     FROM s_prelevement pr WHERE pr.etat IN ('reussi', 'echoue')"
+) as $pr) {
+    $attendu = $pr->etat === 'reussi' ? 1 : 0;
+    if ((int) $pr->encaissements !== $attendu) {
+        $ecarts[] = Vente::reference($pr->id_vente) . " : le prélèvement n° {$pr->id_prelevement} ({$pr->etat}) a {$pr->encaissements} encaissement(s), $attendu attendu(s)";
+    }
+}
+
+// Un prélèvement ne reste pas sans issue : le rattrapage le résout en quelques minutes
+foreach ($Mysql->fetchAll("SELECT id_prelevement, id_vente FROM s_prelevement WHERE etat = 'en_cours' AND date_creation < DATE_SUB(NOW(), INTERVAL 30 MINUTE)") as $pr) {
+    $ecarts[] = Vente::reference($pr->id_vente) . " : le prélèvement n° {$pr->id_prelevement} est sans issue depuis plus de trente minutes";
+}
+
+// L'outil ne prélève que les ventes dont le client et la carte sont connus de Stripe
+foreach ($Mysql->fetchAll("SELECT id_vente FROM v_vente WHERE prelevement <> 'aucun' AND (stripe_customer_id IS NULL OR stripe_payment_method_id IS NULL)") as $v) {
+    $ecarts[] = Vente::reference($v->id_vente) . " : prélèvements réglés sans carte enregistrée";
+}
+
+// Une seule page de paiement ouverte par vente et par commande
+foreach ($Mysql->fetchAll(
+    "SELECT COALESCE(CONCAT('vente ', id_vente), CONCAT('commande ', id_commande)) AS cible, COUNT(*) AS nb
+     FROM s_session WHERE etat = 'ouverte' AND date_expiration > NOW() GROUP BY id_vente, id_commande HAVING COUNT(*) > 1"
+) as $s) {
+    $ecarts[] = "{$s->cible} : {$s->nb} pages de paiement ouvertes en même temps";
 }
 
 if (count($ecarts) > 0) {

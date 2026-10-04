@@ -118,6 +118,29 @@ class Pilotage
         return $groupes;
     }
 
+    /**
+     * À ce jour : les programmes en cours, et parmi eux ceux qui s'achèvent bientôt. Chaque nombre est le total de la
+     * liste des clients filtrée par `programme` (v1/contacts/), avec la même condition (Compte::conditionVue) :
+     * clients non classés seulement. Null sans le droit sur les clients.
+     */
+    public function programmes($user, $aujourdhui)
+    {
+        global $Mysql, $U;
+
+        if (!$U->can($user, 'clients', 'L')) {
+            return null;
+        }
+        $statuts = Contact::GROUPES['clients'];
+        $base = "c.statut IN (" . implode(', ', array_fill(0, count($statuts), '?')) . ") AND c.date_archivage IS NULL AND ";
+        $nombres = array();
+        foreach (array('en_cours', 'fin_proche') as $vue) {
+            $cond = Compte::conditionVue($vue, $aujourdhui);
+            $nombres[$vue] = (int) $Mysql->fetchOne("SELECT COUNT(*) AS nb FROM d_contact c WHERE " . $base . $cond[0], array_merge($statuts, $cond[1]))->nb;
+        }
+
+        return $nombres;
+    }
+
     /** À ce jour : les dossiers de chaque groupe lisible, par statut (chaque nombre est le total d'une liste de dossiers). */
     public function dossiers($user)
     {

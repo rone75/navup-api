@@ -48,7 +48,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     }
 
     // Liste ################################
-    // GET ?groupe=prospects|clients&q=&statut=a,b&origine=&du=&au=&action=retard|prevue&categorie=&archive=1&sort=&dir=&page=&limit=
+    // GET ?groupe=prospects|clients&q=&statut=a,b&origine=&programme=en_cours|fin_proche|termine&du=&au=&action=retard|prevue&categorie=&archive=1&sort=&dir=&page=&limit=
     // La prochaine action d'un dossier est l'échéance de sa tâche ouverte la plus proche : action=retard retient
     // les dossiers dont une tâche est due aujourd'hui ou en retard, action=prevue ceux qui ont une tâche ouverte.
 
@@ -90,6 +90,16 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     if (isset($_GET['origine']) && is_string($_GET['origine']) && preg_match('/^[a-z0-9_]{1,30}$/', $_GET['origine'])) {
         $where[] = "c.code_origine = ?";
         $params[] = $_GET['origine'];
+    }
+
+    // Programme du compte NavUp Academy : en cours, fin proche, terminé. La condition est celle du chiffre du tableau de bord.
+    if (isset($_GET['programme']) && is_string($_GET['programme']) && $_GET['programme'] !== '') {
+        $cond = Compte::conditionVue($_GET['programme'], date('Y-m-d'));
+        if ($cond === null) {
+            $Response->validationError("Vue de programme inconnue.");
+        }
+        $where[] = $cond[0];
+        $params = array_merge($params, $cond[1]);
     }
 
     // Période sur le premier contact (à défaut, la création du dossier)
@@ -185,10 +195,6 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
     if (!empty($data['email'])) {
         $S->verifierUnique('d_contact', 'email', $data['email'], "Un dossier existe déjà avec cette adresse e-mail.");
     }
-    if (empty($data['date_premier_contact'])) {
-        $data['date_premier_contact'] = date('Y-m-d');
-    }
-
     // Autres dossiers au même téléphone, parmi ceux que l'utilisateur peut lire
     $doublons = array();
     if (!empty($data['telephone'])) {
@@ -206,12 +212,8 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
         }
     }
 
-    $data['statut'] = $statut;
-    $data['id_users_createur'] = $id_users;
-
     $SQL->begin_transaction();
-    $id = $S->inserer('d_contact', $data);
-    $Contact->tracer($id, $id_users, 'contact_create', array('statut' => $statut), array('type' => 'creation', 'details' => array('statut' => $statut)));
+    $id = $Contact->creer($data, $statut, $id_users);
     $SQL->commit();
 
     $Response->success(array(

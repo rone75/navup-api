@@ -65,6 +65,7 @@ class Vente
     // Colonnes servies : la vente, ses sommes, et du dossier l'identité seulement (aucune donnée familiale).
     const COLONNES = "v.id_vente, v.id_contact, v.code_offre, o.libelle AS offre, v.date_vente, v.montant_catalogue, v.remise, v.motif_remise,
         v.montant, v.modalite, v.code_moyen, m.libelle AS moyen, v.statut, v.commentaire, v.date_annulation, v.motif_annulation, v.source,
+        v.stripe_customer_id, v.stripe_payment_method_id, v.prelevement, v.date_carte,
         v.date_creation, v.date_modif,
         c.prenom, c.nom, c.statut AS contact_statut, c.date_archivage AS contact_date_archivage,
         COALESCE(s.encaisse, 0) AS encaisse, COALESCE(s.rembourse, 0) AS rembourse, COALESCE(s.frais, 0) AS frais,
@@ -85,6 +86,41 @@ class Vente
     public static function euros($centimes)
     {
         return number_format(((int) $centimes) / 100, 2, ',', "\u{202F}") . "\u{00A0}€";
+    }
+
+    /**
+     * Adresse d'un objet dans le tableau de bord de Stripe (client, paiement), pour l'ouvrir depuis l'outil ; null sans
+     * identifiant. Le mode (essai ou réel) se lit dans la clé configurée : le front ne compose pas cette adresse.
+     */
+    public static function lienStripe($rubrique, $id)
+    {
+        global $_STRIPE_CLE_SECRETE;
+
+        if ($id === null || $id === '') {
+            return null;
+        }
+        $essai = isset($_STRIPE_CLE_SECRETE) && strpos((string) $_STRIPE_CLE_SECRETE, 'sk_test_') === 0;
+
+        return 'https://dashboard.stripe.com/' . ($essai ? 'test/' : '') . $rubrique . '/' . rawurlencode((string) $id);
+    }
+
+    /**
+     * Échéancier proposé pour un total en $n fois : parts égales, les centimes de reste sur la première échéance,
+     * une échéance par mois à partir de $debut, bornée à la fin du mois. Même règle que proposerEcheancier() du front.
+     */
+    public static function echeancier($total, $n, $debut)
+    {
+        $part = intdiv((int) $total, (int) $n);
+        $reste = (int) $total - $part * (int) $n;
+        list($a, $m, $j) = array_map('intval', explode('-', $debut));
+        $echeances = array();
+        for ($i = 0; $i < $n; $i++) {
+            $premier = mktime(12, 0, 0, $m + $i, 1, $a);
+            $jour = min($j, (int) date('t', $premier));
+            $echeances[] = array('date_prevue' => date('Y-m-', $premier) . str_pad((string) $jour, 2, '0', STR_PAD_LEFT), 'montant' => $part + ($i === 0 ? $reste : 0));
+        }
+
+        return $echeances;
     }
 
     public function charger($id_vente)
@@ -147,6 +183,11 @@ class Vente
             'date_annulation' => $v->date_annulation,
             'motif_annulation' => $v->motif_annulation,
             'source' => $v->source,
+            // Paiement en ligne : la carte est enregistrée chez Stripe, l'outil n'en garde que l'identifiant
+            'carte' => $v->stripe_payment_method_id !== null,
+            'date_carte' => $v->date_carte,
+            'prelevement' => $v->prelevement,
+            'lien_stripe' => self::lienStripe('customers', $v->stripe_customer_id),
             'encaisse' => (int) $v->encaisse,
             'rembourse' => (int) $v->rembourse,
             'frais' => (int) $v->frais,
@@ -208,13 +249,31 @@ class Vente
         global $Mysql;
 
         $aujourdhui = date('Y-m-d');
+        // Prélèvement des échéances non soldées : prévu si l'outil prélève cette vente, en cours pendant l'appel à Stripe
+        $v = $Mysql->fetchOne(
+            "SELECT v.prelevement, v.date_annulation,
+                    (SELECT MAX(pr.id_echeance) FROM s_prelevement pr WHERE pr.id_vente = v.id_vente AND pr.etat = 'en_cours') AS en_cours
+             FROM v_vente v WHERE v.id_vente = ?",
+            array((int) $id_vente),
+            'i'
+        );
+        $preleve = $v !== null && $v->prelevement === 'actif' && $v->date_annulation === null;
         $out = array();
         foreach ($Mysql->fetchAll(
             "SELECT * FROM v_echeance WHERE id_vente = ? ORDER BY (date_annulation IS NOT NULL), rang, id_echeance",
             array((int) $id_vente),
             'i'
         ) as $e) {
-            $out[] = $this->echeanceSortie($e, $aujourdhui);
+            $ligne = $this->echeanceSortie($e, $aujourdhui);
+            $ligne['prelevement'] = null;
+            if ($e->date_annulation === null && (int) $e->montant_paye < (int) $e->montant) {
+                if ($v !== null && $v->en_cours !== null && (int) $v->en_cours === (int) $e->id_echeance) {
+                    $ligne['prelevement'] = 'en_cours';
+                } elseif ($preleve && $e->date_dernier_echec === null) {
+                    $ligne['prelevement'] = 'prevu';
+                }
+            }
+            $out[] = $ligne;
         }
 
         return $out;
@@ -249,6 +308,7 @@ class Vente
             // Encaissement rejeté par un impayé enregistré ensuite
             'rejete' => isset($p->rejete) && (int) $p->rejete === 1,
             'source' => $p->source,
+            'lien_stripe' => self::lienStripe('payments', isset($p->stripe_payment_intent_id) ? $p->stripe_payment_intent_id : null),
             'annulee' => $p->date_annulation !== null,
             'date_annulation' => $p->date_annulation,
             'motif_annulation' => $p->motif_annulation,
@@ -714,10 +774,13 @@ class Vente
 
     /**
      * Automatismes du dossier après une écriture, dans la même transaction.
-     * - Premier paiement (l'encaissé passe de zéro à plus de zéro) : un prospect devient « Client ».
-     * - Vente annulée ou remboursée en totalité, sans autre vente : un client devient « Annulé / remboursé ».
+     * - Premier paiement (l'encaissé passe de zéro à plus de zéro) : le compte NavUp Academy s'ouvre, le programme
+     *   commence le jour du paiement et le dossier devient « Client actif » (« Client » si l'offre n'a pas de formation).
+     * - Vente annulée ou remboursée en totalité, sans autre vente : le compte est désactivé, un client devient
+     *   « Annulé / remboursé ».
      * - Écriture annulée pour erreur de saisie (premier paiement, ou remboursement total) : le dossier reprend
-     *   son statut précédent si le dernier changement de statut est bien celui que l'écriture avait provoqué.
+     *   son statut précédent si le dernier changement de statut est bien celui que l'écriture avait provoqué,
+     *   et son compte suit (désactivé si le paiement disparaît, réactivé si la vente revit).
      * Ils s'appliquent quel que soit le droit de l'auteur sur les dossiers : c'est l'écriture financière qui les déclenche.
      * Retourne les avertissements à montrer à l'utilisateur.
      */
@@ -727,29 +790,46 @@ class Vente
 
         $avertissements = array();
         $contact = $Contact->charger($id_contact);
+        // Autres ventes du dossier qui comptent encore : tant qu'il en reste une, ni le statut ni le compte ne se défont
+        $autres = function () use ($Mysql, $id_contact, $id_vente) {
+            return (int) $Mysql->fetchOne(
+                "SELECT COUNT(*) AS nb FROM v_vente WHERE id_contact = ? AND id_vente <> ? AND statut NOT IN ('annule', 'rembourse')",
+                array((int) $id_contact, (int) $id_vente),
+                'ii'
+            )->nb;
+        };
 
         if ($avant['encaisse'] <= 0 && $apres['encaisse'] > 0 && !in_array($apres['statut'], self::DEFAITES, true)) {
-            if (Contact::groupeDe($contact->statut) === 'prospects' || $contact->statut === 'annule_rembourse') {
+            $actif = Compte::ouvrir($id_contact, $id_vente, $id_users, 'automatique');
+            $arrivant = Contact::groupeDe($contact->statut) === 'prospects' || $contact->statut === 'annule_rembourse';
+            if ($actif && ($arrivant || in_array($contact->statut, array('client', 'programme_termine'), true))) {
+                $Contact->changerStatut($contact, 'client_actif', $id_users, 'automatique');
+            } elseif (!$actif && $arrivant) {
                 $Contact->changerStatut($contact, 'client', $id_users, 'automatique');
             }
         } elseif (in_array($apres['statut'], self::DEFAITES, true) && !in_array($avant['statut'], self::DEFAITES, true)) {
-            if (in_array($contact->statut, array('client', 'client_actif', 'programme_termine'), true)) {
-                $autres = (int) $Mysql->fetchOne(
-                    "SELECT COUNT(*) AS nb FROM v_vente WHERE id_contact = ? AND id_vente <> ? AND statut NOT IN ('annule', 'rembourse')",
-                    array((int) $id_contact, (int) $id_vente),
-                    'ii'
-                )->nb;
-                if ($autres === 0) {
+            if ($autres() === 0) {
+                Compte::desactiver($id_contact, $id_users, 'automatique');
+                if (in_array($contact->statut, array('client', 'client_actif', 'programme_termine'), true)) {
                     $Contact->changerStatut($contact, 'annule_rembourse', $id_users, 'automatique');
                 }
             }
         } elseif ($erreurDeSaisie) {
-            // Le changement à défaire : « Client » si le premier paiement disparaît, « Annulé / remboursé » si la vente revit
+            // Le changement à défaire : « Client actif » (ou « Client ») si le premier paiement disparaît,
+            // « Annulé / remboursé » si la vente revit
             $aDefaire = null;
-            if ($avant['encaisse'] > 0 && $apres['encaisse'] <= 0 && $contact->statut === 'client') {
-                $aDefaire = 'client';
-            } elseif (in_array($avant['statut'], self::DEFAITES, true) && !in_array($apres['statut'], self::DEFAITES, true) && $contact->statut === 'annule_rembourse') {
-                $aDefaire = 'annule_rembourse';
+            if ($avant['encaisse'] > 0 && $apres['encaisse'] <= 0) {
+                if ($autres() === 0) {
+                    Compte::desactiver($id_contact, $id_users, 'automatique');
+                }
+                if (in_array($contact->statut, array('client', 'client_actif'), true)) {
+                    $aDefaire = $contact->statut;
+                }
+            } elseif (in_array($avant['statut'], self::DEFAITES, true) && !in_array($apres['statut'], self::DEFAITES, true)) {
+                Compte::reactiver($id_contact, $id_users, true);
+                if ($contact->statut === 'annule_rembourse') {
+                    $aDefaire = 'annule_rembourse';
+                }
             }
             if ($aDefaire !== null) {
                 $dernier = $Mysql->fetchOne(
@@ -779,6 +859,10 @@ class Vente
         $ligne['id_users'] = $id_users;
         $ligne['source'] = $origine === 'automatique' ? 'stripe' : 'manuel';
         $idp = $S->inserer('v_paiement', $ligne);
+        // Après un encaissement, une page de paiement restée ouverte ferait payer deux fois la même échéance
+        if ($ligne['type'] === 'encaissement') {
+            $this->fermerSessions($vente->id_vente);
+        }
 
         $this->historiser($vente->id_vente, 'paiement', $idp, $ligne['type'], null, array(
             'montant' => $ligne['montant'],
@@ -823,15 +907,107 @@ class Vente
             array((int) $id_vente),
             'i'
         );
+        $this->fermerSessions($id_vente);
+    }
+
+    /**
+     * Une page de paiement ouverte ne doit plus servir quand la vente change (annulation, révision de l'échéancier) :
+     * elle est marquée expirée ici, dans la transaction ; la tâche planifiée la ferme ensuite chez Stripe.
+     */
+    private function fermerSessions($id_vente)
+    {
+        global $Mysql;
+
+        $Mysql->execute("UPDATE s_session SET etat = 'expiree', date_modif = NOW() WHERE id_vente = ? AND etat = 'ouverte'", array((int) $id_vente), 'i');
+    }
+
+    /** Refuse de modifier une vente pendant qu'un prélèvement est parti chez Stripe : son issue n'est pas encore connue. */
+    private function exigerSansPrelevement($id_vente)
+    {
+        global $Mysql, $Response;
+
+        if ($Mysql->fetchOne("SELECT 1 AS x FROM s_prelevement WHERE id_vente = ? AND etat = 'en_cours' LIMIT 1", array((int) $id_vente), 'i') !== null) {
+            $Response->validationError("Un prélèvement est en cours sur cette vente : attendez son issue (quelques minutes) avant de la modifier.");
+        }
+    }
+
+    /**
+     * Carte enregistrée chez Stripe au paiement d'une échéance : l'outil garde l'identifiant du client et du moyen de
+     * paiement, et prélèvera les échéances suivantes à leur date. Des prélèvements suspendus à la main le restent.
+     * Ouvre et valide sa transaction, dossier verrouillé.
+     */
+    public function enregistrerCarte($id_vente, $client, $moyen, $id_users = null, $origine = 'automatique')
+    {
+        global $SQL, $Mysql, $Contact;
+
+        $vente = $this->charger($id_vente);
+        $this->verrouiller($vente->id_contact);
+        $vente = $this->charger($id_vente);
+
+        if ($vente->stripe_payment_method_id !== $moyen || $vente->stripe_customer_id !== $client) {
+            $prelevement = $vente->prelevement === 'suspendu' ? 'suspendu' : 'actif';
+            $Mysql->execute(
+                "UPDATE v_vente SET stripe_customer_id = ?, stripe_payment_method_id = ?, prelevement = ?, date_carte = NOW(), date_modif = NOW() WHERE id_vente = ?",
+                array($client, $moyen, $prelevement, (int) $id_vente),
+                'sssi'
+            );
+            $this->historiser($id_vente, 'vente', $id_vente, 'carte', array('prelevement' => $vente->prelevement), array('prelevement' => $prelevement), $id_users, $origine);
+            $Contact->tracer($vente->id_contact, $id_users, 'vente_carte', array('id_vente' => (int) $id_vente), array(
+                'type' => 'vente', 'module' => 'ventes', 'objet_type' => 'vente', 'objet_id' => (int) $id_vente,
+                'details' => array('action' => 'carte'), 'origine' => $origine,
+            ));
+        }
+        $SQL->commit();
+    }
+
+    /** Client Stripe d'une vente, posé avant l'ouverture de sa première page de paiement. Ni historique ni fil : rien n'a encore été payé. */
+    public function noterClientStripe($id_vente, $client)
+    {
+        global $Mysql;
+
+        $Mysql->execute("UPDATE v_vente SET stripe_customer_id = ?, date_modif = NOW() WHERE id_vente = ? AND stripe_customer_id IS NULL", array($client, (int) $id_vente), 'si');
+    }
+
+    /**
+     * Suspend ou reprend les prélèvements d'une vente dont la carte est enregistrée (geste d'un utilisateur).
+     * Ouvre et valide sa transaction, dossier verrouillé.
+     */
+    public function reglerPrelevement($id_vente, $actif, $id_users)
+    {
+        global $SQL, $Mysql, $Contact, $Response;
+
+        $vente = $this->charger($id_vente);
+        $this->verrouiller($vente->id_contact);
+        $vente = $this->charger($id_vente);
+
+        if ($vente->stripe_payment_method_id === null) {
+            $Response->validationError("Aucune carte n'est enregistrée pour cette vente : il n'y a pas de prélèvement à régler.");
+        }
+        if ($vente->date_annulation !== null) {
+            $Response->validationError("Cette vente est annulée : il n'y a plus rien à prélever.");
+        }
+        $nouveau = $actif ? 'actif' : 'suspendu';
+        if ($vente->prelevement !== $nouveau) {
+            $Mysql->execute("UPDATE v_vente SET prelevement = ?, date_modif = NOW() WHERE id_vente = ?", array($nouveau, (int) $id_vente), 'si');
+            $this->historiser($id_vente, 'vente', $id_vente, 'prelevement', array('prelevement' => $vente->prelevement), array('prelevement' => $nouveau), $id_users);
+            $Contact->tracer($vente->id_contact, $id_users, 'vente_prelevement', array('id_vente' => (int) $id_vente, 'prelevement' => $nouveau), array(
+                'type' => 'vente', 'module' => 'ventes', 'objet_type' => 'vente', 'objet_id' => (int) $id_vente,
+                'details' => array('action' => 'prelevement', 'prelevement' => $nouveau),
+            ));
+        }
+        $SQL->commit();
     }
 
     /**
      * Enregistre une vente et son échéancier ; avec $encaissement (array date_paiement, code_moyen, reference),
      * encaisse tout de suite la première échéance.
      * $data : champs de specVente() ; $echeances : liste de lireEcheances() ; $cle : clé de saisie ou null.
-     * Retourne array(id_vente, avertissements, deja) ; `deja` : la clé de saisie avait déjà servi, rien n'a été écrit.
+     * $stripe (vente née d'un paiement en ligne) : array('stripe_id' => paiement à l'origine de la vente,
+     * 'stripe_customer_id') ; $encaissement porte alors aussi 'stripe_id', 'stripe_payment_intent_id' et 'frais'.
+     * Retourne array(id_vente, avertissements, deja) ; `deja` : la clé de saisie ou le paiement Stripe avait déjà servi,
+     * rien n'a été écrit.
      */
-    public function creer($contact, $data, $echeances, $encaissement, $cle, $id_users, $origine = 'utilisateur')
+    public function creer($contact, $data, $echeances, $encaissement, $cle, $id_users, $origine = 'utilisateur', $stripe = null)
     {
         global $SQL, $Mysql, $S, $Contact, $Response;
 
@@ -857,6 +1033,15 @@ class Vente
 
         if ($cle !== null) {
             $deja = $Mysql->fetchOne("SELECT id_vente FROM v_vente WHERE cle_saisie = ?", array($cle), 's');
+            if ($deja !== null) {
+                $SQL->commit();
+
+                return array('id_vente' => (int) $deja->id_vente, 'avertissements' => array(), 'deja' => true);
+            }
+        }
+        // Même garde pour un paiement Stripe signalé deux fois (webhook, rattrapage, retour de la page de paiement)
+        if ($stripe !== null && isset($stripe['stripe_id'])) {
+            $deja = $Mysql->fetchOne("SELECT id_vente FROM v_vente WHERE stripe_id = ?", array($stripe['stripe_id']), 's');
             if ($deja !== null) {
                 $SQL->commit();
 
@@ -889,6 +1074,8 @@ class Vente
             'code_moyen' => isset($data['code_moyen']) ? $data['code_moyen'] : null,
             'commentaire' => isset($data['commentaire']) ? $data['commentaire'] : null,
             'source' => $origine === 'automatique' ? 'stripe' : 'manuel',
+            'stripe_id' => $stripe !== null && isset($stripe['stripe_id']) ? $stripe['stripe_id'] : null,
+            'stripe_customer_id' => $stripe !== null && isset($stripe['stripe_customer_id']) ? $stripe['stripe_customer_id'] : null,
             'cle_saisie' => $cle,
             'id_users' => $id_users,
         ));
@@ -908,14 +1095,20 @@ class Vente
         if ($encaissement !== null) {
             $vente = $this->charger($idv);
             $premiere = $this->premiereNonSoldee($idv);
-            $this->inscrire($vente, array(
+            $ligne = array(
                 'type' => 'encaissement',
                 'montant' => $echeances[0]['montant'],
                 'date_paiement' => $encaissement['date_paiement'],
                 'code_moyen' => $encaissement['code_moyen'],
-                'reference' => $encaissement['reference'],
+                'reference' => isset($encaissement['reference']) ? $encaissement['reference'] : null,
                 'id_echeance' => (int) $premiere->id_echeance,
-            ), $id_users, $origine);
+            );
+            foreach (array('stripe_id', 'stripe_payment_intent_id', 'frais') as $champ) {
+                if (isset($encaissement[$champ])) {
+                    $ligne[$champ] = $encaissement[$champ];
+                }
+            }
+            $this->inscrire($vente, $ligne, $id_users, $origine);
         }
 
         $apres = $this->recalculer($idv);
@@ -939,6 +1132,15 @@ class Vente
 
         if ($cle !== null) {
             $deja = $Mysql->fetchOne("SELECT id_paiement FROM v_paiement WHERE cle_saisie = ?", array($cle), 's');
+            if ($deja !== null) {
+                $SQL->commit();
+
+                return array('id_paiement' => (int) $deja->id_paiement, 'avertissements' => array(), 'deja' => true);
+            }
+        }
+        // Même garde pour un fait Stripe signalé deux fois : l'identifiant Stripe de l'écriture ne sert qu'une fois
+        if (isset($ligne['stripe_id'])) {
+            $deja = $Mysql->fetchOne("SELECT id_paiement FROM v_paiement WHERE stripe_id = ?", array($ligne['stripe_id']), 's');
             if ($deja !== null) {
                 $SQL->commit();
 
@@ -1097,7 +1299,7 @@ class Vente
     }
 
     /** Corrige les champs descriptifs d'une écriture (moyen, référence, frais, commentaire). Retourne les champs modifiés. */
-    public function corrigerEcriture($paiement, $data, $id_users)
+    public function corrigerEcriture($paiement, $data, $id_users, $origine = 'utilisateur')
     {
         global $SQL, $S, $Contact;
 
@@ -1110,7 +1312,7 @@ class Vente
         if (count($modifies) > 0) {
             $SQL->begin_transaction();
             $S->mettreAJour('v_paiement', 'id_paiement', (int) $paiement->id_paiement, $data);
-            $this->historiser($paiement->id_vente, 'paiement', $paiement->id_paiement, 'correction', array_intersect_key($avant, $data), $data, $id_users);
+            $this->historiser($paiement->id_vente, 'paiement', $paiement->id_paiement, 'correction', array_intersect_key($avant, $data), $data, $id_users, $origine);
             $Contact->tracer($vente->id_contact, $id_users, 'paiement_update', array('id_vente' => (int) $paiement->id_vente, 'id_paiement' => (int) $paiement->id_paiement, 'champs' => $modifies));
             $SQL->commit();
         }
@@ -1165,6 +1367,7 @@ class Vente
         if ($vente->date_annulation !== null) {
             $Response->validationError("Cette vente est annulée : son échéancier ne se modifie plus.");
         }
+        $this->exigerSansPrelevement($id_vente);
         $catalogue = (int) $vente->montant_catalogue;
         $nouvelleRemise = $remise === null ? (int) $vente->remise : (int) $remise;
         if ($nouvelleRemise >= $catalogue) {
@@ -1199,6 +1402,8 @@ class Vente
 
         // Les échéances non soldées sont des prévisions : elles sont remplacées, l'ancien échéancier reste dans l'historique
         $Mysql->execute("DELETE FROM v_echeance WHERE id_vente = ? AND date_annulation IS NULL AND montant_paye < montant", array((int) $id_vente), 'i');
+        // Une page de paiement ouverte porte l'ancien montant : elle ne doit plus servir
+        $this->fermerSessions($id_vente);
         if ($nouvelleRemise !== (int) $vente->remise) {
             $Mysql->execute(
                 "UPDATE v_vente SET remise = ?, motif_remise = ?, date_modif = NOW() WHERE id_vente = ?",
@@ -1250,6 +1455,7 @@ class Vente
             return array();
         }
         $avant = array('encaisse' => (int) $vente->encaisse, 'rembourse' => (int) $vente->rembourse, 'statut' => $vente->statut);
+        $this->exigerSansPrelevement($id_vente);
 
         if ($remboursement !== null) {
             $remboursable = (int) $vente->encaisse - (int) $vente->rembourse;

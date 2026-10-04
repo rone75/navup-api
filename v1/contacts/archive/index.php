@@ -42,27 +42,12 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
     if (!isset($R->archive) || !in_array($R->archive, array(0, 1), true)) {
         $Response->validationError("Erreur paramètre ARCHIVE manquant (0 ou 1)");
     }
-    $archive = $R->archive;
-    $deja = $contact->date_archivage !== null;
-
-    if (($archive === 1) !== $deja) {
-        $SQL->begin_transaction();
-        $Mysql->execute(
-            "UPDATE d_contact SET date_archivage = " . ($archive === 1 ? "NOW()" : "NULL") . ", date_modif = NOW() WHERE id_contact = ?",
-            array($id),
-            'i'
-        );
-        $Contact->tracer(
-            $id,
-            (int) $user->id_users,
-            $archive === 1 ? 'contact_archive' : 'contact_restore',
-            null,
-            array('type' => 'archivage', 'details' => array('archive' => $archive))
-        );
+    $SQL->begin_transaction();
+    if ($Contact->archiver($contact, $R->archive === 1, (int) $user->id_users)) {
         // Les alertes de suivi d'un dossier classé s'arrêtent (ses alertes de paiement restent) ; elles reprennent s'il est rouvert
         $Tache->synchroniser($id);
-        $SQL->commit();
     }
+    $SQL->commit();
 
     $Response->success(array('contact' => $Contact->sortie($Contact->charger($id))));
 }

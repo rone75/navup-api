@@ -35,14 +35,19 @@ class Header
     /**
      * L'origine annoncée par le navigateur (en-tête Origin) est-elle autorisée ?
      * - développement ($_PROD = 0) : localhost / 127.0.0.1 / [::1], quel que soit le port ;
-     * - toujours : hôte présent EXACTEMENT dans $_CORS_ORIGINES (require/secret.php), en https uniquement.
+     * - toujours : hôte présent EXACTEMENT dans la liste d'origines, en https uniquement. La liste est
+     *   $_CORS_ORIGINES (require/secret.php) pour l'outil ; un endpoint public passe la sienne ($origines).
      *
      * parse_url() isole l'hôte : "https://evil.tld/?x=https://tour.navup.fr" et
      * "tour.navup.fr.evil.tld" sont refusés, ce qu'un test de sous-chaîne laisserait passer.
      */
-    private function origineAutorisee($origin)
+    private function origineAutorisee($origin, $origines = null)
     {
         global $_PROD, $_CORS_ORIGINES;
+
+        if ($origines === null) {
+            $origines = isset($_CORS_ORIGINES) ? $_CORS_ORIGINES : null;
+        }
 
         $parts = parse_url((string) $origin);
         if ($parts === false || empty($parts['host'])) {
@@ -56,11 +61,11 @@ class Header
             return true;
         }
 
-        if ($scheme !== 'https' || !isset($_CORS_ORIGINES) || !is_array($_CORS_ORIGINES)) {
+        if ($scheme !== 'https' || !is_array($origines)) {
             return false;
         }
 
-        return in_array($host, array_map('strtolower', $_CORS_ORIGINES), true);
+        return in_array($host, array_map('strtolower', $origines), true);
     }
 
     /**
@@ -82,8 +87,11 @@ class Header
      * - Pas d'en-tête Origin (curl, appel serveur à serveur) : aucun en-tête CORS, la requête continue.
      *   La frontière de sécurité est le jeton Bearer ; CORS ne fait que limiter les navigateurs.
      * Pas de Access-Control-Allow-Credentials : l'authentification passe par l'en-tête Authorization, sans cookie.
+     *
+     * $origines : liste d'hôtes d'un endpoint public (site, appli des parents), à la place de $_CORS_ORIGINES.
+     * Un endpoint public n'a pas de jeton : CORS n'y est pas une barrière, ses propres garde-fous le sont.
      */
-    public function cors($option = null)
+    public function cors($option = null, $origines = null)
     {
         if ($option == 'json') {
             header('Content-Type: application/json');
@@ -100,7 +108,7 @@ class Header
         $origin = isset($_SERVER['HTTP_ORIGIN']) ? trim((string) $_SERVER['HTTP_ORIGIN']) : '';
 
         if ($origin !== '') {
-            if (!$this->origineAutorisee($origin)) {
+            if (!$this->origineAutorisee($origin, $origines)) {
                 $this->refuser();
             }
 

@@ -2,8 +2,8 @@
 Options -Indexes
 
 RewriteEngine on
-# Dossiers internes jamais servis en HTTP (dépôt git, classes, config et secrets, SQL, scripts CLI)
-RewriteRule ^(\.git|include|require|sql|script-cgi)(/|$) - [F,L]
+# Dossiers internes jamais servis en HTTP (dépôt git, classes, bibliothèques embarquées, config et secrets, SQL, scripts CLI)
+RewriteRule ^(\.git|include|api|require|sql|script-cgi)(/|$) - [F,L]
 
 # Fichiers cachés (.gitignore…) et fichiers sensibles
 <FilesMatch "(^\.|\.(sql|md|log)$)">

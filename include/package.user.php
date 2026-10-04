@@ -15,6 +15,7 @@ class User
 
     // Matrice des droits (CDC §22, moindre privilège) : module => profil => 'C' complet | 'L' lecture seule | null aucun accès.
     // 'famille' couvre les données sensibles du dossier : informations familiales, problématiques, notes internes, comptes rendus.
+    // 'formation' : la définition du programme vendu (semaines, sujets, fichiers) ; l'accompagnement la lit, l'admin l'écrit.
     const MATRICE = array(
         'prospects'    => array('admin' => 'C', 'accompagnement' => 'C',  'gestion' => 'L'),
         'clients'      => array('admin' => 'C', 'accompagnement' => 'C',  'gestion' => 'L'),
@@ -24,6 +25,7 @@ class User
         'rendez_vous'  => array('admin' => 'C', 'accompagnement' => 'C',  'gestion' => 'L'),
         'appels'       => array('admin' => 'C', 'accompagnement' => 'C',  'gestion' => null),
         'taches'       => array('admin' => 'C', 'accompagnement' => 'C',  'gestion' => 'C'),
+        'formation'    => array('admin' => 'C', 'accompagnement' => 'L',  'gestion' => null),
         'statistiques' => array('admin' => 'C', 'accompagnement' => 'L',  'gestion' => 'C'),
         'exports'      => array('admin' => 'C', 'accompagnement' => null, 'gestion' => 'C'),
         'parametres'   => array('admin' => 'C', 'accompagnement' => null, 'gestion' => null),

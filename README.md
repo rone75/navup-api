@@ -2,13 +2,13 @@
 
 API REST PHP 8 de la « Tour de contrôle NavUp », l'outil interne de pilotage de NavUp Academy (prospects, clients, ventes, paiements, rendez-vous, appels, tâches, statistiques). Front Angular 21 : `~/Documents/_DEV/navup-front`.
 
-Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre les étapes 1 (socle et authentification), 2 (prospects, clients, fiche 360°) et 3 (ventes, paiements, échéancier). L'appli des parents est un projet séparé (`navup-parent-api`).
+Cahier des charges : `~/Documents/nabil/Cahier_des_charges_Tour_de_controle_NavUp.pdf`. Livraison par étapes ; cette version couvre les étapes 1 (socle et authentification), 2 (prospects, clients, fiche 360°), 3 (ventes, paiements, échéancier), 4 (rendez-vous, appels, tâches), 5 (tableau de bord) et 6a (la formation et la chaîne de vente : gestion de la formation, e-mails aux parents, paiement par Stripe, compte NavUp Academy et programme, supervision). L'appli des parents est un projet séparé (`navup-parent-api`) qui lit la même base : la formation (`f_*`) et les comptes (`a_compte`) sont ses sources de vérité.
 
 Même style maison que `manicarton-api` : pas de framework, pas de composer, un dossier par ressource (`v1/<ressource>/index.php`), classes partagées dans `include/`. Les règles de code sont dans `CLAUDE.md`.
 
 ## Installation
 
-Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PHP 8.2 ou plus, MariaDB.
+Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PHP 8.2 ou plus avec `curl`, `mbstring` et `fileinfo`, MariaDB, `ffmpeg` et `ffprobe` (conversion des audios de la formation), `cron`.
 
 1. Créer l'utilisateur MariaDB de l'application, limité à la base `navup` (jamais root) :
 
@@ -30,6 +30,8 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < sql/020_ventes.sql
    mariadb -unavup -p navup < sql/030_suivi.sql
    mariadb -unavup -p navup < sql/031_prochaine_action.sql
+   mariadb -unavup -p navup < sql/040_formation.sql
+   mariadb -unavup -p navup < sql/041_connexions.sql
    ```
 
    Sur une base déjà en service (étape 3), `030_suivi.sql` convertit les « prochaines actions » des dossiers en tâches ; `031_prochaine_action.sql` retire ensuite leurs deux colonnes et ne s'applique qu'une fois l'API de l'étape 4 en place. Les deux fichiers se rejouent sans effet.
@@ -39,6 +41,25 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    ```bash
    php script-cgi/seed-admin.php --email=<email> --identifiant=<login> --nom=<nom> --prenom=<prenom>
    ```
+
+5. Étape 6a. Compléter `require/secret.php` d'après `secret.exemple.php` : clés Stripe (`$_STRIPE_CLE_SECRETE`, `$_STRIPE_SECRET_WEBHOOK`), mode des e-mails (`$_MAIL_MODE = "essai"` tant qu'aucun e-mail ne doit sortir), origines des pages publiques, adresses, dossier des médias. Puis :
+
+   ```bash
+   # Dossier des médias, hors du dépôt et hors du web : php-fpm et l'utilisateur de la tâche planifiée y écrivent
+   sudo install -d -o <utilisateur> -g apache -m 2770 /var/www/navup-media
+
+   # Fedora, SELinux : laisser php-fpm joindre Stripe, et envoyer des e-mails
+   sudo setsebool -P httpd_can_network_connect 1
+   sudo setsebool -P httpd_can_sendmail 1
+
+   # Tâche planifiée (crontab de l'utilisateur qui possède le dossier des médias)
+   */15 * * * * /usr/bin/php /var/www/navup-api/script-cgi/planifie.php > /dev/null
+
+   # La formation fournie par le client : 12 semaines, 40 sujets en brouillon, leur audio et leur fiche
+   php script-cgi/importer-formation.php --dossier=<dossier du client>
+   ```
+
+   Dans Stripe, déclarer le webhook `https://<hôte>/navup-api/v1/stripe/webhook/` pour `checkout.session.completed`, `checkout.session.expired`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created` et `charge.dispute.closed` (la liste `PaiementStripe::TYPES`), puis copier son secret de signature dans `$_STRIPE_SECRET_WEBHOOK`. Sans webhook (poste de développement), la tâche planifiée relit les événements récents : les paiements sont constatés au plus tard au passage suivant, et tout de suite au retour du parent sur la page de paiement.
 
 L'API répond alors sur `http://localhost/navup-api/v1/`.
 
@@ -233,9 +254,60 @@ Règles tenues par l'API :
 - **Activité récente** (`Contact::activite()`) : dans l'ordre d'enregistrement (un appel noté le lendemain arrive en tête, avec `date_evenement` au jour du fait et `date_creation` au jour de la saisie). Liste blanche `Contact::SQL_ACTIVITE` : création et classement d'un dossier, note, changement de statut, vente créée ou annulée, écriture, rendez-vous, échange. N'y entrent pas : les corrections, le statut automatique d'un rendez-vous (il double le fait voisin), les tâches, et ce dont le libellé est une donnée familiale (déclaration, enfant, problématique). Aucun texte n'est lu : une note s'annonce sans son contenu, un rendez-vous sans son motif.
 - **Droits** : chaque bloc exige son droit (`ventes`, `paiements`, les groupes de dossiers ; `rendez_vous`, `ventes`, `clients` pour les étapes de la conversion) et manque à la réponse sans lui. L'activité se limite aux modules et aux dossiers lisibles : le profil `gestion` n'y voit ni note ni échange.
 
+## Endpoints de l'étape 6a : formation, paiement en ligne, compte, e-mails, connexions
+
+| Méthode et chemin | Rôle | Accès |
+|---|---|---|
+| `GET v1/formation/` | la formation entière : semaines, sujets, fichiers, ce qui manque à chaque sujet pour être publié | `formation` lecture |
+| `PUT v1/formation/` `{nom, description}` | son nom et sa présentation | `formation` complet |
+| `POST`, `PUT`, `DELETE v1/formation/semaines/` | ajouter une semaine à la suite, la modifier (`titre`, `description`, `decalage_jours`), retirer la dernière si elle est vide | `formation` complet |
+| `POST`, `PUT`, `DELETE v1/formation/sujets/` | ajouter un sujet en brouillon, le modifier (titre, numéro, semaine, pochette), retirer un brouillon avec ses fichiers | `formation` complet |
+| `PUT v1/formation/ordre/` `{id_semaine, sujets: [ids]}` | l'ordre des sujets d'une semaine | `formation` complet |
+| `PUT v1/formation/publication/` `{id_sujet, publie}` | publier (audio prêt et fiche exigés) ou repasser en brouillon | `formation` complet |
+| `POST v1/formation/televersement/` `{id_sujet, role, nom, taille}` | ouvrir un téléversement → `{id_fichier, morceau}` | `formation` complet |
+| `PUT v1/formation/televersement/` `?id=&position=` (corps binaire), puis `?id=&fin=1` | envoyer un morceau (4 Mo au plus) ; clore : taille contrôlée, type lu dans le fichier | `formation` complet |
+| `GET`, `DELETE v1/formation/fichier/` `?id=` | lire un fichier (audio d'écoute, fiche, annexe) ; le retirer ou abandonner un téléversement | `formation` lecture ; complet pour retirer |
+| `GET v1/comptes/` `?id_contact=` | le compte NavUp Academy du dossier, son programme, ses consentements | lecture du dossier |
+| `PUT v1/comptes/` `{id_contact, date_debut, date_fin}` | changer le début du programme, prolonger l'accès | complet sur le dossier |
+| `PUT v1/comptes/etat/` `{id_contact, actif}` | désactiver ou réactiver le compte (les dates ne changent pas) | complet sur le dossier |
+| `GET v1/messages/` `?id_contact=` | les e-mails envoyés au parent ; le corps selon le module du modèle | lecture du dossier |
+| `POST v1/ventes/lien/` `{id_vente}` ou `{id_vente, envoyer: 1}` | créer un lien de paiement (l'adresse n'est donnée qu'une fois) ; l'envoyer par e-mail | `paiements` complet |
+| `PUT v1/ventes/prelevement/` `{id_vente, action}` | `relancer` l'échéance due, `suspendre` ou `reprendre` les prélèvements | `paiements` complet |
+| `GET v1/connexions/` | état de Stripe, des e-mails, des médias, de la tâche planifiée, et ce qui est en erreur | `parametres` lecture |
+| `POST v1/connexions/relance/` `{id_evenement}`, `POST v1/messages/relance/` `{id_message}` | rejouer un signal Stripe, renvoyer un e-mail | `parametres` complet |
+| `POST v1/public/commande/` `{prenom, nom, email, telephone?, fois, cgv, confidentialite, communications?, cle_saisie}` | achat en ligne → `{suite: "paiement", url}` ou `{suite: "email"}` | **public** (origines de `$_CORS_ORIGINES_PUBLIQUES`) |
+| `GET v1/public/paiement/` `?j=<jeton>` | lien de paiement : redirige (303) vers la page Stripe de l'échéance due | **public** |
+| `GET v1/public/retour/` `?etat=&session=` | retour de la page Stripe : constate le paiement, puis page minimale ou redirection vers `$_URL_RETOUR_PAIEMENT` | **public** |
+| `POST v1/stripe/webhook/` | événement signé par Stripe ; 400 sans signature valide | signature Stripe |
+
+`v1/contacts/` accepte `programme=en_cours|fin_proche|termine` ; chaque dossier porte `programme {etat, semaine, sur, date_debut, date_fin, fin_proche}` ou `null`. `v1/ventes/` sert `carte`, `date_carte`, `prelevement` (`aucun`, `actif`, `suspendu`) et, par écriture venue de Stripe, `lien_stripe` ; chaque échéance porte `prelevement` (`prevu`, `en_cours` ou `null`). `v1/tableau-de-bord/` ajoute `programmes {en_cours, fin_proche}` (le total de `v1/contacts/?groupe=clients&programme=en_cours`) et, pour l'administrateur, `connexions {erreurs}`.
+
+Règles tenues par l'API :
+
+- **Formation** : semaines → sujets → fichiers. La semaine 1 est disponible le premier jour du programme, chaque semaine suivante `decalage_jours` après le début (7, 14… par défaut). Un sujet a un numéro unique, un titre public, une pochette (`jaune`, `bleu`), un état (brouillon, publié). Il ne se publie qu'avec son audio prêt et sa fiche ; publié, il ne se supprime pas (ses fichiers se remplacent).
+- **Fichiers** : envoyés par morceaux, sans toucher aux limites de PHP. Rôles `audio` (MP3, WAV, M4A), `fiche` (PDF), `annexe` (PDF, image, MP3). Le type est lu dans le fichier (`finfo`). Un audio lourd est converti en MP3 d'écoute par la tâche planifiée (`ffmpeg`, 128 kbit/s) et l'original n'est pas conservé. Les fichiers vivent dans `$_DOSSIER_MEDIAS`, nommés par leur empreinte, et ne se lisent que par `v1/formation/fichier/`.
+- **Achat en ligne** : comptant ou en trois fois (`$_VENTE_EN_LIGNE_FOIS`). Le dossier est retrouvé par son e-mail, ou créé en prospect ; un dossier existant n'est jamais modifié. La vente n'est créée qu'au paiement. Si le dossier a déjà une vente en cours ou un programme ouvert, aucune page de paiement : un e-mail part à l'adresse du dossier, et la réponse est la même que pour un inconnu. Garde-fous : limiteur par adresse IP (`$_LIMITE_COMMANDE`), corps borné, champ leurre `site`, clé de saisie, verrou par adresse.
+- **Paiement** : page Stripe Checkout (`mode=payment`, carte). S'il reste des échéances, la carte est enregistrée pour les prélever à leur date : pas d'abonnement Stripe, l'échéancier reste celui de l'outil. Le reçu est celui de Stripe.
+- **Premier encaissement** : le compte NavUp Academy s'ouvre, le programme commence le jour du paiement (fin = dernier jour de la dernière semaine), le dossier passe en « Client actif » et l'e-mail de bienvenue part. Une vente défaite sans autre vente désactive le compte ; un nouvel achat après un programme terminé ou désactivé pose de nouvelles dates.
+- **Prélèvements** : e-mail d'avis `$_PRELEVEMENT_AVIS_JOURS` jours avant ; jamais avant la date, ni hors de `$_PRELEVEMENT_HEURES`. Un échec écrit un impayé, crée la tâche « paiement échoué » et envoie au parent un lien de paiement ; rien n'est retenté sans un geste de l'utilisateur.
+- **Remboursement et litige** : faits dans Stripe, constatés par l'outil (écriture de remboursement au motif « Remboursement effectué dans Stripe », impayé à l'ouverture d'un litige).
+- **Un fait Stripe ne s'écrit qu'une fois** : webhook, rattrapage, page de retour et issue d'un prélèvement passent par le même traitement, qui relit l'objet chez Stripe ; l'idempotence tient à l'identifiant Stripe, contrôlé sous le verrou du dossier. Un fait impossible à écrire (vente annulée, trop-perçu) reste « en erreur », relançable depuis « Connexions ».
+- **E-mails** : texte brut, modèles `bienvenue`, `lien_paiement`, `prelevement_avis`, `paiement_echoue`, `commande_en_cours`, `semaine`. En mode `essai`, rien ne sort du serveur et chaque message est noté « envoyé en essai ». Le corps conservé ne contient pas de lien à jeton. L'e-mail « nouvelle semaine » attend l'adresse de l'appli des parents (`$_APP_PARENTS_URL`).
+- **Programme terminé** : déduit de la date de fin. La tâche planifiée passe alors le dossier en « Programme terminé » ; l'alerte « Fin de programme proche » apparaît sept jours avant (`$_PROGRAMME_FIN_PROCHE_JOURS`).
+
+### Tâche planifiée
+
+`php script-cgi/planifie.php` enchaîne les passes, chacune dans son sous-processus : `stripe-rattrapage`, `stripe-avis`, `stripe-prelevements`, `stripe-frais`, `comptes`, `semaines`, `medias`, `messages`, `taches`, `surveillance` (`--liste` les énumère, `--passe=<nom>` en lance une). Un second lancement simultané est refusé. Le dernier passage et le compte rendu de chaque passe se lisent dans l'onglet « Connexions » ; la passe `surveillance` écrit à `$_MAIL_ERREUR` quand quelque chose reste en erreur, une fois par jour au plus.
+
+### Contrôles
+
+- `php script-cgi/verifier-connexions.php [--rapide]` : lecture seule, utilisable en production ; signaux et e-mails en attente, comptes, commandes, fichiers de la formation (présence, taille, empreinte, refus de l'accès HTTP direct), tâche planifiée.
+- `php script-cgi/essai-stripe.php` : le scénario complet contre le vrai Stripe en mode test (commande en trois fois, premier paiement, carte enregistrée, avis, prélèvement, échec, lien de paiement, remboursement), chaque fait rejoué. Refusé en production et sans clé de test.
+- La page Checkout elle-même s'essaie depuis le front : `npm run essai` (page d'essai sur `http://127.0.0.1:4300/`), carte `4242 4242 4242 4242`.
+
 ## Profils et droits
 
-Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion.
+Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion. Le module `formation` (étape 6a) : l'administrateur écrit, `accompagnement` lit, `gestion` n'y accède pas.
 
 ## Tests manuels
 
@@ -270,7 +342,8 @@ Les parcours automatisés du front (`navup-front/outils/`) créent des comptes d
 
 Le cahier des charges (§22) interdit les secrets dans le code et demande de limiter strictement l'accès aux données familiales.
 
-- Les identifiants de base sont dans `require/secret.php`, hors dépôt. Les clés Stripe et SMTP y iront aussi.
+- Les identifiants de base et les clés Stripe sont dans `require/secret.php`, hors dépôt. Aucune donnée de carte n'est stockée : seulement des identifiants Stripe.
+- Les endpoints publics (`v1/public/`) ont leur propre liste d'origines, un limiteur par adresse IP, et ne renvoient aucune donnée de dossier. Les liens de paiement sont des jetons tirés au hasard dont seule l'empreinte est conservée. Le webhook n'accepte qu'un événement signé.
 - `u_token` ne contient que l'empreinte des jetons : une sauvegarde de la base ne donne aucune session utilisable.
 - Les mails d'erreur SQL ne contiennent ni les valeurs liées ni la chaîne de requête de l'URL.
 - `Header::cors()` n'accepte que `localhost` en développement et les hôtes de `$_CORS_ORIGINES` en production ; aucun jeton de contournement, aucune adresse IP en dur.
@@ -281,5 +354,9 @@ Le cahier des charges (§22) interdit les secrets dans le code et demande de lim
 ## Mise en production
 
 - `require/secret.php` : `$_PROD = 1`, l'hôte du front dans `$_CORS_ORIGINES`, l'utilisateur MariaDB aux droits réduits.
+- Stripe : les clés du compte NavUp (`sk_live_…`, refusées tant que `$_PROD = 0`), le webhook déclaré et son secret, `$_URL_TOUR`, `$_URL_RETOUR_PAIEMENT` et l'origine de la landing page dans `$_CORS_ORIGINES_PUBLIQUES`.
+- E-mails : `$_MAIL_MODE = "reel"` une fois les textes validés et le domaine d'envoi configuré (SPF, DKIM).
+- La tâche planifiée dans la crontab, le dossier des médias créé et sauvegardé avec la base.
+- À faire valider avant l'ouverture, hors code : CGV et droit de rétractation pour un accès immédiat, textes des e-mails.
 - HTTPS obligatoire. La double authentification est prévue avant l'ouverture aux données réelles (étape 8 de la feuille de route).
 - Journal d'accès d'Apache : la recherche envoie le terme saisi (un nom, un téléphone) dans l'URL de l'API. Utiliser un format de journal sans la chaîne de requête, par exemple `LogFormat "%h %l %u %t \"%m %U %H\" %>s %b" navup` puis `CustomLog … navup` dans l'hôte virtuel de l'API (`%U` est le chemin seul, `%r` contiendrait les paramètres).

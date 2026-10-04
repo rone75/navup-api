@@ -1043,10 +1043,14 @@ class Tache
         'rdv_a_confirmer' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'rdv'),
         'rdv_compte_rendu' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'rdv'),
         'appel_a_rappeler' => array('categorie' => 'suivi', 'nature' => 'appel', 'objet' => 'interaction'),
+        'programme_fin_proche' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'compte'),
     );
 
     // Un rendez-vous à confirmer se rappelle deux jours avant
     const JOURS_AVANT_RDV = 2;
+
+    // Une fin de programme reste à traiter pendant ces jours après la fin (bilan, clôture)
+    const JOURS_APRES_PROGRAMME = 14;
 
     // Délai minimal entre deux synchronisations générales, en minutes
     const INTERVALLE_SYNCHRO = 5;
@@ -1061,7 +1065,8 @@ class Tache
         e.id_vente AS o_ech_id_vente, e.date_prevue AS o_ech_date_prevue, e.montant AS o_ech_montant, e.montant_paye AS o_ech_montant_paye,
         p.id_vente AS o_pai_id_vente, p.type AS o_pai_type, p.montant AS o_pai_montant, p.date_paiement AS o_pai_date,
         r.type AS o_rdv_type, r.statut AS o_rdv_statut, r.date_debut AS o_rdv_date_debut,
-        i.date_interaction AS o_int_date";
+        i.date_interaction AS o_int_date,
+        ac.date_fin AS o_cpt_date_fin";
 
     const SQL_FROM = " FROM t_tache t
         LEFT JOIN d_contact c ON c.id_contact = t.id_contact
@@ -1071,7 +1076,8 @@ class Tache
         LEFT JOIN v_echeance e ON t.objet_type = 'echeance' AND e.id_echeance = t.objet_id
         LEFT JOIN v_paiement p ON t.objet_type = 'paiement' AND p.id_paiement = t.objet_id
         LEFT JOIN r_rdv r ON t.objet_type = 'rdv' AND r.id_rdv = t.objet_id
-        LEFT JOIN i_interaction i ON t.objet_type = 'interaction' AND i.id_interaction = t.objet_id";
+        LEFT JOIN i_interaction i ON t.objet_type = 'interaction' AND i.id_interaction = t.objet_id
+        LEFT JOIN a_compte ac ON t.objet_type = 'compte' AND ac.id_compte = t.objet_id";
 
     // LECTURE ########################################################
 
@@ -1171,6 +1177,9 @@ class Tache
         }
         if ($t->objet_type === 'interaction' && $t->o_int_date !== null) {
             return array('id_interaction' => (int) $t->objet_id, 'date_interaction' => $t->o_int_date);
+        }
+        if ($t->objet_type === 'compte' && $t->o_cpt_date_fin !== null) {
+            return array('id_compte' => (int) $t->objet_id, 'date_fin' => $t->o_cpt_date_fin);
         }
 
         return null;
@@ -1566,6 +1575,18 @@ class Tache
                                 AND (s.date_interaction > i.date_interaction OR (s.date_interaction = i.date_interaction AND s.id_interaction > i.id_interaction))
                           )";
                 $dossier = 'i.id_contact';
+                break;
+
+            case 'programme_fin_proche':
+                // Programme qui s'achève bientôt, ou achevé depuis peu : bilan et clôture à prévoir ; due quelques jours avant la fin
+                $proche = isset($GLOBALS['_PROGRAMME_FIN_PROCHE_JOURS']) ? (int) $GLOBALS['_PROGRAMME_FIN_PROCHE_JOURS'] : 7;
+                $sql = "SELECT a.id_compte AS objet_id, a.id_contact, a.date_fin - INTERVAL $proche DAY AS date_echeance, NULL AS id_users
+                        FROM a_compte a INNER JOIN d_contact c ON c.id_contact = a.id_contact
+                        WHERE a.etat = 'actif' AND a.date_fin <= DATE_ADD(?, INTERVAL $proche DAY)
+                          AND a.date_fin >= DATE_SUB(?, INTERVAL " . self::JOURS_APRES_PROGRAMME . " DAY) AND c.date_archivage IS NULL";
+                $params[] = $jour;
+                $params[] = $jour;
+                $dossier = 'a.id_contact';
                 break;
 
             default:
