@@ -48,3 +48,7 @@ $_APP_PARENTS_URL = "";
 $_DOSSIER_MEDIAS = "/var/www/navup-media";
 $_FFMPEG = "/usr/bin/ffmpeg";
 $_FFPROBE = "/usr/bin/ffprobe";
+// pdftoppm et pdfinfo (paquet poppler-utils) rendent les pages d'une fiche PDF en images, pour l'appli des parents
+// (vide : pas de rendu, la fiche ne s'y ouvre qu'en PDF)
+$_PDFTOPPM = "/usr/bin/pdftoppm";
+$_PDFINFO = "/usr/bin/pdfinfo";

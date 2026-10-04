@@ -18,6 +18,8 @@ class Message
     const MODELES = array(
         'bienvenue' => array('libelle' => 'Bienvenue', 'module' => 'dossier'),
         'semaine' => array('libelle' => 'Nouvelle semaine', 'module' => 'dossier'),
+        'invitation' => array('libelle' => "Invitation à l'espace personnel", 'module' => 'dossier'),
+        'mot_de_passe' => array('libelle' => 'Mot de passe oublié', 'module' => 'dossier'),
         'lien_paiement' => array('libelle' => 'Lien de paiement', 'module' => 'paiements'),
         'prelevement_avis' => array('libelle' => 'Prélèvement à venir', 'module' => 'paiements'),
         'paiement_echoue' => array('libelle' => 'Paiement échoué', 'module' => 'paiements'),
@@ -26,6 +28,8 @@ class Message
 
     // Marque laissée dans le corps conservé à la place d'un lien personnel : le lien n'est composé qu'à l'envoi
     const MARQUE_LIEN = '{{lien_paiement}}';
+    // Lien d'accès à l'espace personnel (création ou réinitialisation du mot de passe) : créé par Compte::lienAcces() à l'envoi
+    const MARQUE_ACCES = '{{lien_acces}}';
 
     const MOIS = array(1 => 'janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre');
 
@@ -62,7 +66,8 @@ class Message
                 $p[] = "Votre inscription au programme NavUp est enregistrée : merci de votre confiance.";
                 $p[] = "Votre programme commence le " . self::jourEcrit($d['date_debut']) . " et dure " . (int) $d['semaines'] . " semaines. Chaque semaine, de nouveaux contenus se débloquent.";
                 $p[] = !empty($d['appli'])
-                    ? "Votre espace personnel vous attend ici : " . $d['appli']
+                    ? "Votre espace personnel est prêt. Pour y entrer, choisissez votre mot de passe :\n" . self::MARQUE_ACCES
+                        . "\nCe lien vous est personnel et reste valable " . (int) ($d['jours'] ?? 7) . " jours. Ensuite, vous vous connecterez ici : " . $d['appli']
                     : "Nous revenons vers vous très vite pour vous ouvrir votre espace personnel.";
                 if (!empty($d['echeances'])) {
                     $lignes = array();
@@ -83,6 +88,20 @@ class Message
                 }
                 $p[] = "La semaine " . (int) $d['semaine'] . " de votre programme NavUp est disponible" . (count($titres) > 0 ? " :\n" . implode("\n", $titres) : ".");
                 $p[] = "Retrouvez-les dans votre espace personnel : " . $d['appli'];
+                break;
+
+            case 'invitation':
+                $sujet = "Votre espace personnel NavUp";
+                $p[] = "Votre espace personnel NavUp est prêt : vous y retrouvez les audios et les fiches de votre programme, semaine après semaine.";
+                $p[] = "Pour y entrer, choisissez votre mot de passe :\n" . self::MARQUE_ACCES;
+                $p[] = "Ce lien vous est personnel et reste valable " . (int) $d['jours'] . " jours. Passé ce délai, demandez-en un nouveau depuis la page de connexion : " . $d['appli'];
+                break;
+
+            case 'mot_de_passe':
+                $sujet = "Votre mot de passe NavUp";
+                $p[] = "Voici le lien pour choisir un nouveau mot de passe :\n" . self::MARQUE_ACCES;
+                $p[] = "Il reste valable " . (int) $d['minutes'] . " minutes et ne sert qu'une fois.";
+                $p[] = "Si cette demande ne vient pas de vous, ignorez cet e-mail : votre mot de passe actuel ne change pas.";
                 break;
 
             case 'lien_paiement':
@@ -261,18 +280,34 @@ class Message
     {
         global $Stripe;
 
-        if (strpos($m->corps, self::MARQUE_LIEN) === false) {
-            return array($m->corps, null);
-        }
-        if ($m->objet_type !== 'vente' || $m->objet_id === null || !isset($Stripe)) {
-            return array(null, "Lien de paiement impossible à composer.");
-        }
-        $lien = $Stripe->creerLien((int) $m->objet_id, null);
-        if ($lien === null) {
-            return array(null, "Plus rien à régler sur cette vente : le lien n'a pas été envoyé.");
+        $corps = $m->corps;
+
+        if (strpos($corps, self::MARQUE_LIEN) !== false) {
+            if ($m->objet_type !== 'vente' || $m->objet_id === null || !isset($Stripe)) {
+                return array(null, "Lien de paiement impossible à composer.");
+            }
+            $lien = $Stripe->creerLien((int) $m->objet_id, null);
+            if ($lien === null) {
+                return array(null, "Plus rien à régler sur cette vente : le lien n'a pas été envoyé.");
+            }
+            $corps = str_replace(self::MARQUE_LIEN, $lien, $corps);
         }
 
-        return array(str_replace(self::MARQUE_LIEN, $lien, $m->corps), null);
+        if (strpos($corps, self::MARQUE_ACCES) !== false) {
+            // Le compte est celui du dossier, quel que soit l'objet du message (une vente pour l'e-mail de bienvenue)
+            $compte = Compte::charger($m->id_contact);
+            $lien = $compte === null ? null : Compte::lienAcces(
+                $compte->id_compte,
+                $m->modele === 'mot_de_passe' ? 'reinitialisation' : 'creation',
+                $m->id_users === null ? null : (int) $m->id_users
+            );
+            if ($lien === null) {
+                return array(null, "Lien d'accès impossible à composer : le dossier n'a pas de compte, ou l'appli des parents n'a pas d'adresse.");
+            }
+            $corps = str_replace(self::MARQUE_ACCES, $lien, $corps);
+        }
+
+        return array($corps, null);
     }
 
     /**
@@ -340,7 +375,11 @@ class Message
             $ligne['destinataire'] = $m->destinataire;
             $ligne['sujet'] = $m->sujet;
             // La marque d'un lien personnel se lit en clair : le lien lui-même n'est gardé nulle part
-            $ligne['corps'] = str_replace(self::MARQUE_LIEN, '(lien de paiement personnel)', $m->corps);
+            $ligne['corps'] = str_replace(
+                array(self::MARQUE_LIEN, self::MARQUE_ACCES),
+                array('(lien de paiement personnel)', "(lien d'accès personnel)"),
+                $m->corps
+            );
         }
 
         return $ligne;

@@ -705,6 +705,7 @@ class PaiementStripe
                     'date_debut' => $compte->date_debut,
                     'semaines' => count(Formation::structure($compte->id_formation)['semaines']),
                     'appli' => isset($_APP_PARENTS_URL) ? $_APP_PARENTS_URL : '',
+                    'jours' => isset($_LIEN_ACCES_CREATION_JOURS) ? (int) $_LIEN_ACCES_CREATION_JOURS : 7,
                     'echeances' => $restantes,
                 ), 'bienvenue:' . (int) $id_vente, array('objet_type' => 'vente', 'objet_id' => (int) $id_vente));
             }

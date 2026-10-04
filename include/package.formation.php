@@ -127,6 +127,8 @@ class Formation
             'taille' => (int) $f->taille,
             'recu' => (int) $f->recu,
             'duree' => $f->duree === null ? null : (int) $f->duree,
+            // Fiche : pages rendues en images pour l'appli des parents (null : rendu impossible sur ce serveur)
+            'pages' => $f->pages === null ? null : (int) $f->pages,
             'etat' => $f->etat,
             'erreur' => $f->erreur,
             // Le fichier que voient les parents pour ce rôle : le dernier prêt
@@ -486,6 +488,81 @@ class Formation
         return (isset($_FFMPEG) && $_FFMPEG !== '' && is_executable($_FFMPEG)) ? $_FFMPEG : null;
     }
 
+    /** pdftoppm et pdfinfo (poppler) rendent les pages d'une fiche en images ; null si l'un des deux manque. */
+    private function poppler()
+    {
+        global $_PDFTOPPM, $_PDFINFO;
+
+        return (isset($_PDFTOPPM, $_PDFINFO) && $_PDFTOPPM !== '' && $_PDFINFO !== '' && is_executable($_PDFTOPPM) && is_executable($_PDFINFO))
+            ? array($_PDFTOPPM, $_PDFINFO)
+            : null;
+    }
+
+    /** Nom du fichier image de la page $n d'une fiche : à côté du PDF, sous la même empreinte. */
+    public static function nomPage($empreinte, $n)
+    {
+        return $empreinte . '.p' . (int) $n . '.jpg';
+    }
+
+    /**
+     * Rend les pages d'une fiche PDF en images JPEG (une par page) : sur un téléphone, un PDF ne s'affiche pas dans la
+     * page, et l'écran d'un sujet de l'appli des parents montre la fiche au-dessus du lecteur audio.
+     * Page par page (-f N -l N -singlefile) : le nom du fichier produit ne dépend pas du nombre de pages.
+     * Les images sont nommées par l'empreinte du PDF : deux lignes du même PDF les partagent, et un rendu déjà fait
+     * n'est pas refait. Retourne le nombre de pages rendues, ou null (outil absent, PDF illisible, trop de pages).
+     */
+    public function rendrePages($empreinte, $pdf)
+    {
+        global $_FICHE_DPI, $_FICHE_PAGES_MAX;
+
+        $outils = $this->poppler();
+        if ($outils === null || !is_file($pdf)) {
+            return null;
+        }
+        list($pdftoppm, $pdfinfo) = $outils;
+
+        $sortie = array();
+        $code = 1;
+        exec(escapeshellarg($pdfinfo) . " " . escapeshellarg($pdf) . " 2>/dev/null", $sortie, $code);
+        $pages = 0;
+        foreach ($sortie as $ligne) {
+            if (preg_match('/^Pages:\s+(\d+)/', $ligne, $m)) {
+                $pages = (int) $m[1];
+            }
+        }
+        $max = isset($_FICHE_PAGES_MAX) ? (int) $_FICHE_PAGES_MAX : 12;
+        if ($code !== 0 || $pages < 1 || $pages > $max) {
+            return null;
+        }
+
+        $d = $this->dossier();
+        $dpi = isset($_FICHE_DPI) ? (int) $_FICHE_DPI : 180;
+        for ($n = 1; $n <= $pages; $n++) {
+            $image = $d . '/' . self::nomPage($empreinte, $n);
+            if (is_file($image) && filesize($image) > 0) {
+                continue;
+            }
+            // pdftoppm ajoute « .jpg » au préfixe : fichier de travail caché, puis renommé d'un coup
+            $travail = $d . '/.' . $empreinte . '.p' . $n;
+            $code = 1;
+            exec(
+                escapeshellarg($pdftoppm) . " -f $n -l $n -r $dpi -jpeg -jpegopt quality=85,progressive=y,optimize=y -singlefile "
+                . escapeshellarg($pdf) . " " . escapeshellarg($travail) . " 2>/dev/null",
+                $sortie,
+                $code
+            );
+            if ($code !== 0 || !is_file($travail . '.jpg') || filesize($travail . '.jpg') === 0) {
+                @unlink($travail . '.jpg');
+
+                return null;
+            }
+            rename($travail . '.jpg', $image);
+            @chmod($image, 0644);
+        }
+
+        return $pages;
+    }
+
     /** Fichier de travail d'une ligne : « part » pendant le téléversement, « source » avant conversion, « mp3 » pendant. */
     private function travail($id_fichier, $suffixe)
     {
@@ -514,6 +591,12 @@ class Formation
         }
         if ($f->chemin !== null && $Mysql->fetchOne("SELECT 1 AS x FROM f_fichier WHERE chemin = ? LIMIT 1", array($f->chemin), 's') === null) {
             @unlink($d . '/' . $f->chemin);
+            // Les pages rendues d'une fiche partent avec son PDF
+            if ($f->empreinte !== null) {
+                foreach (glob($d . '/' . $f->empreinte . '.p*.jpg') ?: array() as $image) {
+                    @unlink($image);
+                }
+            }
         }
     }
 
@@ -665,11 +748,13 @@ class Formation
         @chmod($d . '/' . $relatif, 0644);
 
         $duree = strpos($type, 'audio/') === 0 ? $this->dureeDe($d . '/' . $relatif) : null;
+        // Une fiche n'est prête qu'avec ses pages : elles sont rendues ici, avant que le sujet puisse être publié
+        $pages = ($role === 'fiche' && $type === 'application/pdf') ? $this->rendrePages($empreinte, $d . '/' . $relatif) : null;
         $taille = filesize($d . '/' . $relatif);
         $Mysql->execute(
-            "UPDATE f_fichier SET etat = 'pret', type_mime = ?, taille = ?, recu = ?, duree = ?, empreinte = ?, chemin = ?, erreur = NULL, date_modif = NOW() WHERE id_fichier = ?",
-            array($type, $taille, $taille, $duree, $empreinte, $relatif, (int) $id_fichier),
-            'siiissi'
+            "UPDATE f_fichier SET etat = 'pret', type_mime = ?, taille = ?, recu = ?, duree = ?, pages = ?, empreinte = ?, chemin = ?, erreur = NULL, date_modif = NOW() WHERE id_fichier = ?",
+            array($type, $taille, $taille, $duree, $pages, $empreinte, $relatif, (int) $id_fichier),
+            'siiiissi'
         );
 
         if ($role !== 'annexe') {

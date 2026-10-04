@@ -22,7 +22,9 @@ Automate::demarrer(getcwd() . "/index.php");
 
 // Achat en ligne (CDC §19, §20 ; cahier de l'écosystème §5, §13) ################################
 // Endpoint PUBLIC, sans authentification : appelé par la page de vente (landing page de l'appli des parents).
-// POST {prenom, nom, email, telephone?, fois: 1|3, cgv: 1, confidentialite: 1, communications?: 0|1, cle_saisie}
+// POST {prenom, nom, email, telephone?, fois: 1|3, cgv: 1, confidentialite: 1, communications?: 0|1, cle_saisie, prix_affiche?}
+// prix_affiche : le prix que le parent a lu sur la page (v1/public/offre/), en centimes ; s'il a changé depuis, la
+// commande est refusée et la page le relit, plutôt que de faire payer un autre montant que celui qui était affiché.
 // → {suite: "paiement", url} : rediriger le parent vers la page de paiement Stripe ;
 // → {suite: "email"} : rien à payer ici, le parent a reçu (ou va recevoir) un e-mail.
 //
@@ -51,6 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
             'cgv' => array('type' => 'bool', 'requis' => true, 'libelle' => 'conditions générales de vente'),
             'confidentialite' => array('type' => 'bool', 'requis' => true, 'libelle' => 'politique de confidentialité'),
             'communications' => array('type' => 'bool', 'defaut' => 0),
+            'prix_affiche' => array('type' => 'int', 'min' => 1, 'max' => 100000000, 'libelle' => 'prix affiché'),
         ), false);
         $cle = $S->lireCle($R);
         if ($cle === null) {
@@ -62,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
         if ((int) $data['cgv'] !== 1 || (int) $data['confidentialite'] !== 1) {
             throw new ErreurMetier("Pour commander, acceptez les conditions générales de vente et la politique de confidentialité.");
         }
-        if (!$Stripe->configure()) {
+        if (!$Stripe->configure() || empty($_VENTE_EN_LIGNE_OUVERTE)) {
             throw new ErreurMetier("Le paiement en ligne n'est pas ouvert pour le moment.");
         }
     } catch (ErreurMetier $e) {
@@ -86,6 +89,9 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
             $offre = $Mysql->fetchOne("SELECT code, prix FROM p_offre WHERE code = ? AND actif = 1", array($_VENTE_EN_LIGNE_OFFRE), 's');
             if ($offre === null) {
                 throw new ErreurMetier("Cette offre n'est pas en vente pour le moment.");
+            }
+            if (isset($data['prix_affiche']) && (int) $data['prix_affiche'] !== (int) $offre->prix) {
+                throw new ErreurMetier("Le prix a changé depuis l'affichage de la page : rechargez-la pour voir le prix à jour.");
             }
 
             $SQL->begin_transaction();

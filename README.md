@@ -32,6 +32,8 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < sql/031_prochaine_action.sql
    mariadb -unavup -p navup < sql/040_formation.sql
    mariadb -unavup -p navup < sql/041_connexions.sql
+   mariadb -unavup -p navup < sql/050_parents.sql
+   mariadb -unavup -p navup < /var/www/navup-parent-api/sql/100_espace.sql
    ```
 
    Sur une base déjà en service (étape 3), `030_suivi.sql` convertit les « prochaines actions » des dossiers en tâches ; `031_prochaine_action.sql` retire ensuite leurs deux colonnes et ne s'applique qu'une fois l'API de l'étape 4 en place. Les deux fichiers se rejouent sans effet.
@@ -60,6 +62,14 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    ```
 
    Dans Stripe, déclarer le webhook `https://<hôte>/navup-api/v1/stripe/webhook/` pour `checkout.session.completed`, `checkout.session.expired`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`, `charge.dispute.created` et `charge.dispute.closed` (la liste `PaiementStripe::TYPES`), puis copier son secret de signature dans `$_STRIPE_SECRET_WEBHOOK`. Sans webhook (poste de développement), la tâche planifiée relit les événements récents : les paiements sont constatés au plus tard au passage suivant, et tout de suite au retour du parent sur la page de paiement.
+
+6. Appli des parents (`/var/www/navup-parent-api`, voir son README). Les deux derniers fichiers SQL ci-dessus posent ce qu'elle lit (fin de l'accès, liens d'accès, vues `a_acces` et `a_semaine`) et ses propres tables `e_*`, **que cette API lit aussi** : ils s'appliquent même si l'appli n'est pas encore installée. Dans `require/secret.php` : `$_PDFTOPPM` et `$_PDFINFO` (paquet `poppler-utils` : les pages d'une fiche sont rendues en images), puis, quand l'appli est en place, `$_APP_PARENTS_URL` (les e-mails y mènent ; elle allume l'e-mail « nouvelle semaine ») et `$_URL_RETOUR_PAIEMENT` (sa page `/paiement`). Ensuite :
+
+   ```bash
+   php script-cgi/rendre-fiches.php                # pages des fiches déjà rangées
+   php script-cgi/inviter-comptes.php --simuler    # comptes ouverts avant l'appli : combien sont à inviter
+   php script-cgi/inviter-comptes.php              # leur envoie l'invitation
+   ```
 
 L'API répond alors sur `http://localhost/navup-api/v1/`.
 
@@ -277,6 +287,10 @@ Règles tenues par l'API :
 | `POST v1/connexions/relance/` `{id_evenement}`, `POST v1/messages/relance/` `{id_message}` | rejouer un signal Stripe, renvoyer un e-mail | `parametres` complet |
 | `POST v1/public/commande/` `{prenom, nom, email, telephone?, fois, cgv, confidentialite, communications?, cle_saisie}` | achat en ligne → `{suite: "paiement", url}` ou `{suite: "email"}` | **public** (origines de `$_CORS_ORIGINES_PUBLIQUES`) |
 | `GET v1/public/paiement/` `?j=<jeton>` | lien de paiement : redirige (303) vers la page Stripe de l'échéance due | **public** |
+| `GET v1/public/offre/` | l'offre en vente : prix, détail de chaque modalité, achat ouvert ou non | **public** |
+| `POST v1/public/acces/` `{email}` | demande d'un lien d'accès à l'espace personnel ; réponse toujours identique | **public** |
+| `POST v1/comptes/invitation/` `{id_contact}` ou `{id_contact, envoyer: 1}` | créer un lien d'accès (donné une fois), ou l'envoyer par e-mail | complet sur le dossier |
+| `PUT v1/comptes/acces/` `{id_contact}` | réinitialiser l'accès du parent : mot de passe, sessions et liens ne valent plus | complet sur le dossier |
 | `GET v1/public/retour/` `?etat=&session=` | retour de la page Stripe : constate le paiement, puis page minimale ou redirection vers `$_URL_RETOUR_PAIEMENT` | **public** |
 | `POST v1/stripe/webhook/` | événement signé par Stripe ; 400 sans signature valide | signature Stripe |
 
@@ -286,13 +300,15 @@ Règles tenues par l'API :
 
 - **Formation** : semaines → sujets → fichiers. La semaine 1 est disponible le premier jour du programme, chaque semaine suivante `decalage_jours` après le début (7, 14… par défaut). Un sujet a un numéro unique, un titre public, une pochette (`jaune`, `bleu`), un état (brouillon, publié). Il ne se publie qu'avec son audio prêt et sa fiche ; publié, il ne se supprime pas (ses fichiers se remplacent).
 - **Fichiers** : envoyés par morceaux, sans toucher aux limites de PHP. Rôles `audio` (MP3, WAV, M4A), `fiche` (PDF), `annexe` (PDF, image, MP3). Le type est lu dans le fichier (`finfo`). Un audio lourd est converti en MP3 d'écoute par la tâche planifiée (`ffmpeg`, 128 kbit/s) et l'original n'est pas conservé. Les fichiers vivent dans `$_DOSSIER_MEDIAS`, nommés par leur empreinte, et ne se lisent que par `v1/formation/fichier/`.
-- **Achat en ligne** : comptant ou en trois fois (`$_VENTE_EN_LIGNE_FOIS`). Le dossier est retrouvé par son e-mail, ou créé en prospect ; un dossier existant n'est jamais modifié. La vente n'est créée qu'au paiement. Si le dossier a déjà une vente en cours ou un programme ouvert, aucune page de paiement : un e-mail part à l'adresse du dossier, et la réponse est la même que pour un inconnu. Garde-fous : limiteur par adresse IP (`$_LIMITE_COMMANDE`), corps borné, champ leurre `site`, clé de saisie, verrou par adresse.
+- **Achat en ligne** : comptant ou en trois fois (`$_VENTE_EN_LIGNE_FOIS`). Le dossier est retrouvé par son e-mail, ou créé en prospect ; un dossier existant n'est jamais modifié. La vente n'est créée qu'au paiement. Si le dossier a déjà une vente en cours ou un programme ouvert, aucune page de paiement : un e-mail part à l'adresse du dossier, et la réponse ne dit rien du dossier (`suite: "email"`, quand un inconnu reçoit `suite: "paiement"` : la différence existe, le limiteur par adresse IP la borne). `prix_affiche` (facultatif) : la commande est refusée si le prix lu par le parent n'est plus celui de l'offre. `$_VENTE_EN_LIGNE_OUVERTE = 0` ferme la vente : `v1/public/offre/` l'annonce, la page publique présente le programme sans vendre. Garde-fous : limiteur par adresse IP (`$_LIMITE_COMMANDE`), corps borné, champ leurre `site`, clé de saisie, verrou par adresse.
 - **Paiement** : page Stripe Checkout (`mode=payment`, carte). S'il reste des échéances, la carte est enregistrée pour les prélever à leur date : pas d'abonnement Stripe, l'échéancier reste celui de l'outil. Le reçu est celui de Stripe.
 - **Premier encaissement** : le compte NavUp Academy s'ouvre, le programme commence le jour du paiement (fin = dernier jour de la dernière semaine), le dossier passe en « Client actif » et l'e-mail de bienvenue part. Une vente défaite sans autre vente désactive le compte ; un nouvel achat après un programme terminé ou désactivé pose de nouvelles dates.
 - **Prélèvements** : e-mail d'avis `$_PRELEVEMENT_AVIS_JOURS` jours avant ; jamais avant la date, ni hors de `$_PRELEVEMENT_HEURES`. Un échec écrit un impayé, crée la tâche « paiement échoué » et envoie au parent un lien de paiement ; rien n'est retenté sans un geste de l'utilisateur.
 - **Remboursement et litige** : faits dans Stripe, constatés par l'outil (écriture de remboursement au motif « Remboursement effectué dans Stripe », impayé à l'ouverture d'un litige).
 - **Un fait Stripe ne s'écrit qu'une fois** : webhook, rattrapage, page de retour et issue d'un prélèvement passent par le même traitement, qui relit l'objet chez Stripe ; l'idempotence tient à l'identifiant Stripe, contrôlé sous le verrou du dossier. Un fait impossible à écrire (vente annulée, trop-perçu) reste « en erreur », relançable depuis « Connexions ».
 - **E-mails** : texte brut, modèles `bienvenue`, `lien_paiement`, `prelevement_avis`, `paiement_echoue`, `commande_en_cours`, `semaine`. En mode `essai`, rien ne sort du serveur et chaque message est noté « envoyé en essai ». Le corps conservé ne contient pas de lien à jeton. L'e-mail « nouvelle semaine » attend l'adresse de l'appli des parents (`$_APP_PARENTS_URL`).
+- **Accès à l'espace personnel** (appli des parents) : le lien de création du mot de passe part dans l'e-mail de bienvenue après un achat en ligne ; pour une vente saisie à la main, l'utilisateur envoie l'invitation depuis la fiche. Un lien vaut 7 jours (création) ou 60 minutes (mot de passe oublié), sert une fois, et un nouveau lien annule les précédents. `PUT v1/comptes/` prend trois dates : `date_debut`, `date_fin` (fin du programme) et `date_fin_acces` (fin de la consultation, jamais avant `date_fin`). Modifier l'e-mail d'un dossier révoque l'accès créé avec l'ancienne adresse.
+- **Fiches** : à son rangement, une fiche PDF est rendue en images, une par page (`pdftoppm`, 180 dpi) ; `f_fichier.pages` en garde le nombre. Sans `pdftoppm`, la fiche reste prête et ne s'ouvre dans l'appli qu'en PDF.
 - **Programme terminé** : déduit de la date de fin. La tâche planifiée passe alors le dossier en « Programme terminé » ; l'alerte « Fin de programme proche » apparaît sept jours avant (`$_PROGRAMME_FIN_PROCHE_JOURS`).
 
 ### Tâche planifiée
@@ -302,6 +318,7 @@ Règles tenues par l'API :
 ### Contrôles
 
 - `php script-cgi/verifier-connexions.php [--rapide]` : lecture seule, utilisable en production ; signaux et e-mails en attente, comptes, commandes, fichiers de la formation (présence, taille, empreinte, refus de l'accès HTTP direct), tâche planifiée.
+- `php script-cgi/verifier-connexions.php` compare aussi ce que voit l'appli des parents (vue `a_semaine`) à `Compte::programme()`, et contrôle les pages des fiches.
 - `php script-cgi/essai-stripe.php` : le scénario complet contre le vrai Stripe en mode test (commande en trois fois, premier paiement, carte enregistrée, avis, prélèvement, échec, lien de paiement, remboursement), chaque fait rejoué. Refusé en production et sans clé de test.
 - La page Checkout elle-même s'essaie depuis le front : `npm run essai` (page d'essai sur `http://127.0.0.1:4300/`), carte `4242 4242 4242 4242`.
 

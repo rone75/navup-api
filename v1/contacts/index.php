@@ -249,6 +249,12 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
         $SQL->begin_transaction();
         $S->mettreAJour('d_contact', 'id_contact', $id, $data);
         $Contact->tracer($id, $id_users, 'contact_update', array('champs' => $modifies), array('type' => 'modification', 'details' => array('champs' => $modifies)));
+        // L'adresse d'un dossier est l'identifiant de son espace personnel : si elle change, ce qui a été créé avec
+        // l'ancienne (mot de passe, sessions, liens) ne doit plus ouvrir le programme. Une invitation se renvoie depuis la
+        // fiche ; le parent peut aussi demander un lien depuis la page de connexion.
+        if (in_array('email', $modifies, true)) {
+            Compte::revoquer($id, $id_users, 'automatique');
+        }
         $SQL->commit();
     }
 

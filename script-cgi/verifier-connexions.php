@@ -11,6 +11,9 @@
 //              - commandes : une commande payée a sa vente ; une vente née d'une commande est de source « stripe » ;
 //              - formation : chaque sujet publié a son audio et sa fiche prêts ; chaque fichier prêt existe sur le
 //                disque, avec la taille et l'empreinte notées ; le dossier des médias refuse l'accès HTTP direct ;
+//              - appli des parents : la vue a_semaine et Compte::programme() donnent la même semaine en cours ; l'accès
+//                ne se ferme pas avant la fin du programme ; une fiche prête a ses pages en images ; aucun corps
+//                d'e-mail conservé ne contient un lien d'accès ;
 //              - tâche planifiée : aucune passe en échec (et, en production, dernier passage de moins d'une heure).
 //              Sort avec le code 1 au premier écart, 0 si tout est cohérent.
 // Usage:       php script-cgi/verifier-connexions.php [--rapide]   (--rapide : sans recalcul des empreintes)
@@ -22,6 +25,7 @@ if (php_sapi_name() !== 'cli') {
 }
 
 include __DIR__ . "/../include/package.mysql.php";
+include __DIR__ . "/../include/package.compte.php";
 include __DIR__ . "/../require/param.php";
 
 date_default_timezone_set('Europe/Paris');
@@ -55,9 +59,48 @@ $n = $nombre(
 if ($n > 0) {
     $ecarts[] = "$n e-mail(s) envoyé(s) sans fait dans le fil du dossier";
 }
-$n = $nombre("SELECT COUNT(*) AS n FROM m_message WHERE corps LIKE '%paiement/?j=%'");
+$n = $nombre("SELECT COUNT(*) AS n FROM m_message WHERE corps LIKE '%paiement/?j=%' OR corps LIKE '%mot-de-passe#%'");
 if ($n > 0) {
     $ecarts[] = "$n e-mail(s) conservé(s) avec un lien à jeton";
+}
+
+// Appli des parents : ce que la base lui sert doit dire la même chose que la Tour de contrôle
+// - la vue a_semaine (date de déblocage de chaque semaine) et Compte::programme() (semaine en cours) ;
+// - la fin de l'accès ne précède jamais la fin du programme ;
+// - une fiche prête a ses pages rendues en images, présentes sur le disque (quand le serveur sait les rendre).
+$jour = date('Y-m-d');
+$desaccords = 0;
+foreach ($Mysql->fetchAll("SELECT id_compte, id_formation, etat, date_debut, date_fin FROM a_compte WHERE etat = 'actif' AND date_debut <= ? AND date_fin >= ?", array($jour, $jour), 'ss') as $c) {
+    $vue = $Mysql->fetchOne("SELECT MAX(numero) AS semaine FROM a_semaine WHERE id_compte = ? AND date_deblocage <= ?", array((int) $c->id_compte, $jour), 'is');
+    $programme = Compte::programme($c->etat, $c->id_formation, $c->date_debut, $c->date_fin, $jour);
+    if ($vue === null || (int) $vue->semaine !== (int) $programme['semaine']) {
+        $desaccords++;
+    }
+}
+if ($desaccords > 0) {
+    $ecarts[] = "$desaccords compte(s) dont la semaine en cours diffère entre la vue a_semaine (appli des parents) et Compte::programme()";
+}
+$n = $nombre("SELECT COUNT(*) AS n FROM a_compte WHERE date_fin_acces < date_fin");
+if ($n > 0) {
+    $ecarts[] = "$n compte(s) dont l'accès se ferme avant la fin du programme";
+}
+if (isset($_PDFTOPPM, $_PDFINFO) && $_PDFTOPPM !== '' && is_executable($_PDFTOPPM) && $_PDFINFO !== '' && is_executable($_PDFINFO)) {
+    $sansPages = 0;
+    foreach ($Mysql->fetchAll("SELECT empreinte, pages FROM f_fichier WHERE role = 'fiche' AND etat = 'pret' AND type_mime = 'application/pdf'") as $f) {
+        if ($f->pages === null || (int) $f->pages < 1) {
+            $sansPages++;
+            continue;
+        }
+        for ($p = 1; $p <= (int) $f->pages; $p++) {
+            if (!is_file(rtrim($_DOSSIER_MEDIAS, '/') . '/' . Formation::nomPage($f->empreinte, $p))) {
+                $sansPages++;
+                break;
+            }
+        }
+    }
+    if ($sansPages > 0) {
+        $ecarts[] = "$sansPages fiche(s) prête(s) sans leurs pages en images (php script-cgi/rendre-fiches.php)";
+    }
 }
 
 // Comptes

@@ -168,7 +168,23 @@ class Connexions
                 'fichiers' => $fichiers,
             ),
             'planifie' => self::planifie(),
-            'appli' => array('configuree' => isset($_APP_PARENTS_URL) && $_APP_PARENTS_URL !== ''),
+            // Appli des parents : son adresse, et les comptes ouverts dont le parent n'a pas encore de mot de passe
+            'appli' => array(
+                'configuree' => isset($_APP_PARENTS_URL) && $_APP_PARENTS_URL !== '',
+                'adresse' => isset($_APP_PARENTS_URL) ? $_APP_PARENTS_URL : '',
+                'comptes' => (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM a_compte WHERE etat = 'actif' AND date_fin_acces >= CURDATE()")->n,
+                'sans_mot_de_passe' => (int) $Mysql->fetchOne(
+                    "SELECT COUNT(*) AS n FROM a_compte a LEFT JOIN e_acces e ON e.id_compte = a.id_compte
+                     WHERE a.etat = 'actif' AND a.date_fin_acces >= CURDATE()
+                       AND (e.id_compte IS NULL OR (a.date_revocation IS NOT NULL AND e.date_mot_de_passe <= a.date_revocation))"
+                )->n,
+                'jamais_invites' => (int) $Mysql->fetchOne(
+                    "SELECT COUNT(*) AS n FROM a_compte a
+                     WHERE a.etat = 'actif' AND a.date_fin_acces >= CURDATE()
+                       AND NOT EXISTS (SELECT 1 FROM a_jeton j WHERE j.id_compte = a.id_compte)
+                       AND NOT EXISTS (SELECT 1 FROM e_acces e WHERE e.id_compte = a.id_compte)"
+                )->n,
+            ),
         );
     }
 

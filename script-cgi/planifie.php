@@ -115,6 +115,10 @@ $PASSES = array(
         $differences = $Tache->synchroniser(null, $maintenant);
         $Mysql->execute("UPDATE t_synchro SET date_synchro = ? WHERE id = 1", array($maintenant), 's');
         $Mysql->execute("DELETE FROM u_limite_ip WHERE date_fin < DATE_SUB(NOW(), INTERVAL 1 DAY)");
+        // Ce que l'appli des parents laisse derrière elle : fenêtres de limiteur closes, sessions finies, liens d'accès périmés
+        $Mysql->execute("DELETE FROM e_limite WHERE date_fin < DATE_SUB(NOW(), INTERVAL 1 DAY)");
+        $Mysql->execute("DELETE FROM e_session WHERE date_expiration < NOW()");
+        $Mysql->execute("DELETE FROM a_jeton WHERE date_expiration < DATE_SUB(NOW(), INTERVAL 30 DAY)");
 
         return nb(count($differences), 'tâche automatique ajustée', 'tâches automatiques ajustées');
     },

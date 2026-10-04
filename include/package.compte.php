@@ -6,7 +6,9 @@
 //              programme. Ouvert au premier encaissement par Vente::automatismes(), désactivé quand la vente est
 //              défaite, réglable à la main (dates, désactivation). L'état du programme (pas commencé, en cours,
 //              terminé) et la semaine en cours se déduisent des dates, à la lecture : rien de cela n'est stocké.
-//              Ni mot de passe ni session ici : ils appartiennent à l'appli des parents, qui lit a_compte.
+//              Ni mot de passe ni session ici : ils appartiennent à l'appli des parents (navup-parent-api, tables e_*),
+//              qui lit le compte par la vue a_acces. Ce fichier décide de l'accès (dates, désactivation, révocation)
+//              et crée seul les liens d'accès (a_jeton) ; l'appli les consomme.
 //              Méthodes statiques, fichier inclus par package.contact.php : tout endpoint qui sert un dossier
 //              sert aussi son programme, et toute écriture financière peut ouvrir un compte.
 // Created:     2026-10-04
@@ -112,10 +114,55 @@ class Compte
             'etat' => $compte->etat,
             'date_debut' => $compte->date_debut,
             'date_fin' => $compte->date_fin,
+            'date_fin_acces' => $compte->date_fin_acces,
             'date_activation' => $compte->date_activation,
             'date_desactivation' => $compte->date_desactivation,
             'desactivation_automatique' => $compte->etat === 'desactive' && $compte->origine_desactivation === 'automatique',
             'programme' => self::programme($compte->etat, $compte->id_formation, $compte->date_debut, $compte->date_fin),
+            'acces' => self::acces($compte),
+        );
+    }
+
+    /** Dernier jour d'accès d'un programme qui finit le $fin : $_ACCES_APRES_FIN_JOURS de plus. */
+    private static function finAcces($fin)
+    {
+        global $_ACCES_APRES_FIN_JOURS;
+
+        $jours = isset($_ACCES_APRES_FIN_JOURS) ? max(0, (int) $_ACCES_APRES_FIN_JOURS) : 30;
+
+        return date('Y-m-d', strtotime($fin . ' 12:00:00') + $jours * 86400);
+    }
+
+    /**
+     * Ce que l'on sait de l'espace personnel du parent (tables e_* de l'appli, lues ici, jamais écrites) :
+     * dernier lien envoyé, mot de passe créé, dernière connexion, sujets terminés. Un mot de passe antérieur à la
+     * révocation de l'accès ne compte plus.
+     */
+    public static function acces($compte)
+    {
+        global $Mysql, $_APP_PARENTS_URL;
+
+        $idc = (int) $compte->id_compte;
+        $e = $Mysql->fetchOne("SELECT date_mot_de_passe, date_derniere_connexion, annonce_semaine FROM e_acces WHERE id_compte = ?", array($idc), 'i');
+        $valide = $e !== null && ($compte->date_revocation === null || $e->date_mot_de_passe > $compte->date_revocation);
+        $lien = $Mysql->fetchOne("SELECT MAX(date_creation) AS le FROM a_jeton WHERE id_compte = ?", array($idc), 'i');
+        $sujets = $Mysql->fetchOne(
+            "SELECT COUNT(*) AS sur, COUNT(p.date_termine) AS termines
+             FROM f_sujet s LEFT JOIN e_progression p ON p.id_sujet = s.id_sujet AND p.id_compte = ?
+             WHERE s.id_formation = ? AND s.publie = 1",
+            array($idc, (int) $compte->id_formation),
+            'ii'
+        );
+
+        return array(
+            'appli' => isset($_APP_PARENTS_URL) && $_APP_PARENTS_URL !== '',
+            'lien_le' => $lien === null ? null : $lien->le,
+            'mot_de_passe_le' => $valide ? $e->date_mot_de_passe : null,
+            'derniere_connexion' => $valide ? $e->date_derniere_connexion : null,
+            'revoque_le' => $compte->date_revocation,
+            'annonce_semaine' => $e === null ? true : (int) $e->annonce_semaine === 1,
+            'termines' => (int) $sujets->termines,
+            'sur' => (int) $sujets->sur,
         );
     }
 
@@ -212,9 +259,9 @@ class Compte
 
         if ($compte === null) {
             $Mysql->execute(
-                "INSERT INTO a_compte (id_contact, id_formation, etat, date_debut, date_fin, id_users) VALUES (?, ?, 'actif', ?, ?, ?)",
-                array($idc, (int) $vente->id_formation, $debut, $fin, $id_users === null ? null : (int) $id_users),
-                'iissi'
+                "INSERT INTO a_compte (id_contact, id_formation, etat, date_debut, date_fin, date_fin_acces, id_users) VALUES (?, ?, 'actif', ?, ?, ?, ?)",
+                array($idc, (int) $vente->id_formation, $debut, $fin, self::finAcces($fin), $id_users === null ? null : (int) $id_users),
+                'iisssi'
             );
             self::tracer($idc, $Mysql->lastId(), 'ouverture', $id_users, $origine);
 
@@ -225,10 +272,10 @@ class Compte
             return true;
         }
         $Mysql->execute(
-            "UPDATE a_compte SET etat = 'actif', id_formation = ?, date_debut = ?, date_fin = ?, date_activation = NOW(),
+            "UPDATE a_compte SET etat = 'actif', id_formation = ?, date_debut = ?, date_fin = ?, date_fin_acces = ?, date_activation = NOW(),
                     date_desactivation = NULL, origine_desactivation = NULL, date_modif = NOW() WHERE id_compte = ?",
-            array((int) $vente->id_formation, $debut, $fin, (int) $compte->id_compte),
-            'issi'
+            array((int) $vente->id_formation, $debut, $fin, self::finAcces($fin), (int) $compte->id_compte),
+            'isssi'
         );
         self::tracer($idc, $compte->id_compte, 'reouverture', $id_users, $origine);
 
@@ -282,23 +329,124 @@ class Compte
     }
 
     /**
-     * Change le début ou la fin du programme (« l'administrateur peut exceptionnellement modifier la date de début
-     * ou prolonger l'accès »). Un programme prolongé au-delà d'aujourd'hui rend au dossier son statut « Client actif ».
+     * Change le début du programme, sa fin, ou la fin de l'accès (« l'administrateur peut exceptionnellement modifier
+     * la date de début ou prolonger l'accès »). La fin du programme décide du statut du dossier et de l'alerte « fin
+     * proche » ; la fin de l'accès, elle, ne prolonge que la consultation des contenus dans l'appli des parents.
+     * Un programme prolongé au-delà d'aujourd'hui rend au dossier son statut « Client actif ».
      * Sans transaction : l'appelant la tient, dossier verrouillé.
      */
-    public static function modifierDates($contact, $compte, $debut, $fin, $id_users)
+    public static function modifierDates($contact, $compte, $debut, $fin, $finAcces, $id_users)
     {
         global $Mysql, $Contact;
 
-        if ($debut === $compte->date_debut && $fin === $compte->date_fin) {
+        if ($debut === $compte->date_debut && $fin === $compte->date_fin && $finAcces === $compte->date_fin_acces) {
             return;
         }
-        $Mysql->execute("UPDATE a_compte SET date_debut = ?, date_fin = ?, date_modif = NOW() WHERE id_compte = ?", array($debut, $fin, (int) $compte->id_compte), 'ssi');
+        $Mysql->execute(
+            "UPDATE a_compte SET date_debut = ?, date_fin = ?, date_fin_acces = ?, date_modif = NOW() WHERE id_compte = ?",
+            array($debut, $fin, $finAcces, (int) $compte->id_compte),
+            'sssi'
+        );
         self::tracer($contact->id_contact, $compte->id_compte, 'dates', $id_users, 'utilisateur');
 
         if ($contact->statut === 'programme_termine' && $compte->etat === 'actif' && $fin >= date('Y-m-d')) {
             $Contact->changerStatut($contact, 'client_actif', $id_users, 'utilisateur');
         }
+    }
+
+    // ACCÈS À L'ESPACE PERSONNEL ####################################
+
+    /**
+     * Crée un lien d'accès à l'espace personnel (création ou réinitialisation du mot de passe) et rend son adresse.
+     * Seule l'empreinte du jeton est gardée ; le jeton voyage dans le fragment de l'adresse, que le navigateur
+     * n'envoie à aucun serveur. Un nouveau lien révoque les précédents du compte : un seul lien vaut à la fois.
+     * Retourne null si l'appli des parents n'a pas d'adresse ($_APP_PARENTS_URL).
+     */
+    public static function lienAcces($id_compte, $motif, $id_users = null)
+    {
+        global $Mysql, $U, $_APP_PARENTS_URL, $_LIEN_ACCES_CREATION_JOURS, $_LIEN_ACCES_REINIT_MINUTES;
+
+        if (!isset($_APP_PARENTS_URL) || $_APP_PARENTS_URL === '') {
+            return null;
+        }
+        $idc = (int) $id_compte;
+        $minutes = $motif === 'reinitialisation'
+            ? (isset($_LIEN_ACCES_REINIT_MINUTES) ? (int) $_LIEN_ACCES_REINIT_MINUTES : 60)
+            : (isset($_LIEN_ACCES_CREATION_JOURS) ? (int) $_LIEN_ACCES_CREATION_JOURS : 7) * 1440;
+
+        $Mysql->execute("UPDATE a_jeton SET date_revocation = NOW() WHERE id_compte = ? AND date_revocation IS NULL", array($idc), 'i');
+        $jeton = $U->genToken(40);
+        $Mysql->execute(
+            "INSERT INTO a_jeton (id_compte, jeton, motif, date_expiration, id_users) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), ?)",
+            array($idc, hash('sha256', $jeton), $motif === 'reinitialisation' ? 'reinitialisation' : 'creation', $minutes, $id_users === null ? null : (int) $id_users),
+            'issii'
+        );
+
+        return rtrim($_APP_PARENTS_URL, '/') . '/mot-de-passe#' . $jeton;
+    }
+
+    /** Le parent a-t-il un mot de passe utilisable (créé, et postérieur à la révocation de l'accès) ? */
+    public static function aMotDePasse($compte)
+    {
+        global $Mysql;
+
+        $e = $Mysql->fetchOne("SELECT date_mot_de_passe FROM e_acces WHERE id_compte = ?", array((int) $compte->id_compte), 'i');
+
+        return $e !== null && ($compte->date_revocation === null || $e->date_mot_de_passe > $compte->date_revocation);
+    }
+
+    /**
+     * Dépose l'e-mail qui porte un lien d'accès : « invitation » tant que le parent n'a pas de mot de passe,
+     * « mot de passe oublié » ensuite. Le lien lui-même n'est créé qu'à l'envoi (Message::poserLiens).
+     * La clé dédoublonne par quart d'heure : deux demandes rapprochées ne font qu'un message.
+     * Sans transaction. Retourne l'identifiant du message, ou null (pas de compte, pas d'adresse, déjà déposé).
+     */
+    public static function inviter($contact, $id_users = null)
+    {
+        global $Message, $_APP_PARENTS_URL, $_LIEN_ACCES_CREATION_JOURS, $_LIEN_ACCES_REINIT_MINUTES;
+
+        $compte = self::charger($contact->id_contact);
+        if ($compte === null || !isset($_APP_PARENTS_URL) || $_APP_PARENTS_URL === '') {
+            return null;
+        }
+        $modele = self::aMotDePasse($compte) ? 'mot_de_passe' : 'invitation';
+
+        return $Message->deposer(
+            $contact,
+            $modele,
+            array(
+                'appli' => $_APP_PARENTS_URL,
+                'jours' => isset($_LIEN_ACCES_CREATION_JOURS) ? (int) $_LIEN_ACCES_CREATION_JOURS : 7,
+                'minutes' => isset($_LIEN_ACCES_REINIT_MINUTES) ? (int) $_LIEN_ACCES_REINIT_MINUTES : 60,
+            ),
+            'acces:' . (int) $compte->id_compte . ':' . (int) floor(time() / 900),
+            array(
+                'objet_type' => 'compte', 'objet_id' => (int) $compte->id_compte,
+                'origine' => $id_users === null ? 'automatique' : 'utilisateur', 'id_users' => $id_users,
+            )
+        );
+    }
+
+    /**
+     * Révoque l'accès à l'espace personnel : les sessions, le mot de passe et les liens d'avant ne valent plus rien
+     * (l'appli des parents compare leurs dates à date_revocation). Le compte et ses dates ne changent pas : le parent
+     * retrouve son programme et sa progression avec un nouveau lien. Sert quand l'e-mail du dossier change (une
+     * invitation partie à la mauvaise adresse) et au geste « Réinitialiser l'accès ».
+     * Sans transaction : l'appelant la tient. Retourne true si le dossier a un compte.
+     */
+    public static function revoquer($id_contact, $id_users, $origine = 'utilisateur')
+    {
+        global $Mysql;
+
+        $compte = self::charger($id_contact);
+        if ($compte === null) {
+            return false;
+        }
+        $Mysql->execute("UPDATE a_compte SET date_revocation = NOW(), date_modif = NOW() WHERE id_compte = ?", array((int) $compte->id_compte), 'i');
+        $Mysql->execute("UPDATE a_jeton SET date_revocation = NOW() WHERE id_compte = ? AND date_revocation IS NULL", array((int) $compte->id_compte), 'i');
+        self::tracer($id_contact, $compte->id_compte, 'revocation', $id_users, $origine);
+
+        return true;
     }
 
     /**
@@ -360,7 +508,8 @@ class Compte
      * Passe « semaines » de la tâche planifiée : écrit au parent quand une nouvelle semaine de son programme vient de
      * se débloquer (la première est annoncée par l'e-mail de bienvenue). Éteinte tant que l'appli des parents n'a pas
      * d'adresse ($_APP_PARENTS_URL) : il n'y aurait rien à ouvrir. Rien n'est programmé à l'avance : chaque passage
-     * regarde ce qui est dû, la clé du message empêche un second envoi. Une semaine sans sujet publié ne s'annonce pas.
+     * regarde ce qui est dû, la clé du message empêche un second envoi. Une semaine sans sujet publié ne s'annonce pas,
+     * ni rien à un parent qui a décoché « me prévenir à chaque nouvelle semaine » dans son profil (e_acces).
      * Retourne le nombre de messages déposés, ou null si la passe est éteinte.
      */
     public static function annoncerSemaines()
@@ -375,7 +524,9 @@ class Compte
         $comptes = $Mysql->fetchAll(
             "SELECT a.id_compte, a.id_formation, a.etat, a.date_debut, a.date_fin, c.id_contact, c.prenom, c.email
              FROM a_compte a INNER JOIN d_contact c ON c.id_contact = a.id_contact
-             WHERE a.etat = 'actif' AND a.date_debut <= ? AND a.date_fin >= ? AND c.date_archivage IS NULL AND c.email IS NOT NULL",
+             LEFT JOIN e_acces e ON e.id_compte = a.id_compte
+             WHERE a.etat = 'actif' AND a.date_debut <= ? AND a.date_fin >= ? AND c.date_archivage IS NULL AND c.email IS NOT NULL
+               AND COALESCE(e.annonce_semaine, 1) = 1",
             array($jour, $jour),
             'ss'
         );

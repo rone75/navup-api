@@ -103,6 +103,8 @@ $Mysql->execute("DELETE FROM u_audit WHERE cible_type IN ('sujet', 'semaine', 'f
 $Mysql->execute("DELETE FROM f_sujet WHERE titre LIKE ?", array('Essai%'), 's');
 $Mysql->execute("DELETE FROM f_semaine WHERE titre LIKE ? AND NOT EXISTS (SELECT 1 FROM f_sujet s WHERE s.id_semaine = f_semaine.id_semaine)", array('Essai%'), 's');
 $Mysql->execute("DELETE FROM u_limite_ip WHERE ip IN (?, ?)", array('::1', '127.0.0.1'), 'ss');
+// Appli des parents : ses comptes d'essai partent avec leur dossier (cascade) ; reste son limiteur, pour ce poste
+$Mysql->execute("DELETE FROM e_limite WHERE ip IN (?, ?, ?)", array('::1', '127.0.0.1', ''), 'sss');
 
 // Échecs de connexion sur un identifiant d'essai inconnu, puis traces du navigateur sans tête des parcours
 $nb_audit += $Mysql->execute(

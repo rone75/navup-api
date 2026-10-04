@@ -35,7 +35,8 @@ date_default_timezone_set('Europe/Paris');
 // Le compte s'ouvre tout seul au premier encaissement (Vente::automatismes) : il ne se crée pas ici.
 // GET ?id_contact=N : le compte et son programme (état, semaine en cours, début, fin), ou null ; et les consentements
 //     que le parent a déclarés (achat en ligne).
-// PUT {id_contact, date_debut, date_fin} : change le début du programme ou prolonge l'accès.
+// PUT {id_contact, date_debut, date_fin, date_fin_acces} : change le début ou la fin du programme, ou prolonge l'accès
+//     (les contenus restent consultables dans l'appli des parents jusqu'à date_fin_acces).
 // Chaque écriture renvoie le compte et le dossier (son statut peut suivre).
 
 $reponse = function ($idc) use ($Contact, $Response) {
@@ -64,9 +65,13 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
     $data = $S->lireChamps($R, array(
         'date_debut' => array('type' => 'date', 'requis' => true, 'libelle' => 'début du programme', 'min' => '2020-01-01'),
         'date_fin' => array('type' => 'date', 'requis' => true, 'libelle' => 'fin du programme', 'max' => date('Y-m-d', strtotime('+3 years'))),
+        'date_fin_acces' => array('type' => 'date', 'requis' => true, 'libelle' => "fin de l'accès", 'max' => date('Y-m-d', strtotime('+5 years'))),
     ), false);
     if ($data['date_fin'] < $data['date_debut']) {
         $Response->validationError("Le programme ne peut pas finir avant d'avoir commencé.");
+    }
+    if ($data['date_fin_acces'] < $data['date_fin']) {
+        $Response->validationError("L'accès ne peut pas se fermer avant la fin du programme.");
     }
 
     $Contact->verrouiller($idc);
@@ -75,7 +80,7 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
         $SQL->rollback();
         $Response->validationError("Ce dossier n'a pas de compte : il s'ouvre au premier paiement.");
     }
-    Compte::modifierDates($Contact->charger($idc), $compte, $data['date_debut'], $data['date_fin'], (int) $user->id_users);
+    Compte::modifierDates($Contact->charger($idc), $compte, $data['date_debut'], $data['date_fin'], $data['date_fin_acces'], (int) $user->id_users);
     $Tache->synchroniser($idc);
     $SQL->commit();
 
