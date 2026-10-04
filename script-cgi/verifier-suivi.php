@@ -76,6 +76,7 @@ foreach ($Mysql->fetchAll(
 $nb_rdv = 0;
 foreach ($Mysql->fetchAll(
     "SELECT r.id_rdv, r.statut, r.date_debut, r.id_rdv_precedent, p.statut AS statut_precedent,
+            r.id_rdv_origine, r.rang, p.id_rdv_origine AS origine_precedent, p.rang AS rang_precedent,
             (SELECT COUNT(*) FROM r_rdv s WHERE s.id_rdv_precedent = r.id_rdv) AS successeurs,
             (SELECT COUNT(*) FROM d_evenement e WHERE e.objet_type = 'rdv' AND e.objet_id = r.id_rdv
                AND JSON_VALUE(e.details, '$.action') IN ('creation', 'report')) AS faits
@@ -87,6 +88,12 @@ foreach ($Mysql->fetchAll(
     }
     if ($r->id_rdv_precedent !== null && !in_array($r->statut_precedent, array('reporte', 'absent', 'annule'), true)) {
         $ecarts[] = "rendez-vous n° {$r->id_rdv} : remplace un rendez-vous « {$r->statut_precedent} »";
+    }
+    // Chaîne : le premier créneau est sa propre origine, au rang 0 ; chaque déplacement garde l'origine et avance d'un rang
+    $origine = $r->id_rdv_precedent === null ? (int) $r->id_rdv : (int) $r->origine_precedent;
+    $rang = $r->id_rdv_precedent === null ? 0 : (int) $r->rang_precedent + 1;
+    if ((int) $r->id_rdv_origine !== $origine || (int) $r->rang !== $rang) {
+        $ecarts[] = "rendez-vous n° {$r->id_rdv} : origine " . ($r->id_rdv_origine ?? 'absente') . " au rang {$r->rang} (attendu : $origine au rang $rang)";
     }
     if ((int) $r->faits !== 1) {
         $ecarts[] = "rendez-vous n° {$r->id_rdv} : {$r->faits} fait(s) de création dans le fil (1 attendu)";

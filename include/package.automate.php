@@ -59,7 +59,7 @@ class Automate
         $classes = array(
             'U' => 'User', 'S' => 'Saisie', 'Contact' => 'Contact', 'Vente' => 'Vente',
             'Rdv' => 'Rdv', 'Interaction' => 'Interaction', 'Tache' => 'Tache', 'Suivi' => 'Suivi',
-            'Message' => 'Message', 'Formation' => 'Formation', 'Stripe' => 'PaiementStripe',
+            'Message' => 'Message', 'Formation' => 'Formation', 'Stripe' => 'PaiementStripe', 'Agenda' => 'Agenda',
         );
         foreach ($classes as $globale => $classe) {
             if (class_exists($classe, false) && !isset($GLOBALS[$globale])) {

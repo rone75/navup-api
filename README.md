@@ -34,6 +34,8 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < sql/041_connexions.sql
    mariadb -unavup -p navup < sql/050_parents.sql
    mariadb -unavup -p navup < /var/www/navup-parent-api/sql/100_espace.sql
+   mariadb -unavup -p navup < sql/060_rdv_en_ligne.sql
+   mariadb -unavup -p navup < /var/www/navup-parent-api/sql/110_billet.sql
    ```
 
    Sur une base déjà en service (étape 3), `030_suivi.sql` convertit les « prochaines actions » des dossiers en tâches ; `031_prochaine_action.sql` retire ensuite leurs deux colonnes et ne s'applique qu'une fois l'API de l'étape 4 en place. Les deux fichiers se rejouent sans effet.
@@ -313,7 +315,7 @@ Règles tenues par l'API :
 
 ### Tâche planifiée
 
-`php script-cgi/planifie.php` enchaîne les passes, chacune dans son sous-processus : `stripe-rattrapage`, `stripe-avis`, `stripe-prelevements`, `stripe-frais`, `comptes`, `semaines`, `medias`, `messages`, `taches`, `surveillance` (`--liste` les énumère, `--passe=<nom>` en lance une). Un second lancement simultané est refusé. Le dernier passage et le compte rendu de chaque passe se lisent dans l'onglet « Connexions » ; la passe `surveillance` écrit à `$_MAIL_ERREUR` quand quelque chose reste en erreur, une fois par jour au plus.
+`php script-cgi/planifie.php` enchaîne les passes, chacune dans son sous-processus : `stripe-rattrapage`, `stripe-avis`, `stripe-prelevements`, `stripe-frais`, `comptes`, `semaines`, `medias`, `rdv-rappels`, `messages`, `taches`, `surveillance` (`--liste` les énumère, `--passe=<nom>` en lance une). Un second lancement simultané est refusé. Le dernier passage et le compte rendu de chaque passe se lisent dans l'onglet « Connexions » ; la passe `surveillance` écrit à `$_MAIL_ERREUR` quand quelque chose reste en erreur, une fois par jour au plus.
 
 ### Contrôles
 
@@ -321,6 +323,31 @@ Règles tenues par l'API :
 - `php script-cgi/verifier-connexions.php` compare aussi ce que voit l'appli des parents (vue `a_semaine`) à `Compte::programme()`, et contrôle les pages des fiches.
 - `php script-cgi/essai-stripe.php` : le scénario complet contre le vrai Stripe en mode test (commande en trois fois, premier paiement, carte enregistrée, avis, prélèvement, échec, lien de paiement, remboursement), chaque fait rejoué. Refusé en production et sans clé de test.
 - La page Checkout elle-même s'essaie depuis le front : `npm run essai` (page d'essai sur `http://127.0.0.1:4300/`), carte `4242 4242 4242 4242`.
+
+## Endpoints de l'étape 6b : rendez-vous en ligne
+
+Le parent choisit lui-même un créneau : un visiteur sur la page publique (rendez-vous découverte), un parent inscrit dans son espace (rendez-vous d'accompagnement). Réglages dans `require/param.php` (`$_RDV_PRISE_OUVERTE`, `$_RDV_PRISE` par type : durée, canaux, pas, délai, horizon, maximum à venir ; `$_RDV_PRISE_PLAFOND`, `$_RDV_MODIFIABLE_HEURES`, `$_RDV_DEPLACEMENTS_MAX`, `$_RDV_RAPPEL_HEURES`). Heure de Paris partout.
+
+| Endpoint | Rôle | Droit |
+|---|---|---|
+| `GET`, `PUT v1/agenda/disponibilites/` `{plages: [{jour, debut, fin}], lien_visio}` | plages de la semaine, lien de visio et aperçu des créneaux de l'utilisateur connecté | `rendez_vous` complet |
+| `POST v1/agenda/absences/` `{du, au, heure_du?, heure_au?}`, `DELETE ?id=` | absences : aucun créneau n'y est proposé | `rendez_vous` complet |
+| `GET`, `POST`, `DELETE v1/agenda/jeton/` | flux d'agenda de l'utilisateur : état, création ou renouvellement (l'adresse n'est rendue qu'une fois), coupure | `rendez_vous` |
+| `GET v1/agenda/flux/?j=<jeton>` | le flux lui-même (`text/calendar`), pour l'abonnement d'un calendrier | le jeton |
+| `GET v1/rendez-vous/invitation/?id=` | invitation `.ics` d'un rendez-vous confirmé | `rendez_vous` |
+| `GET v1/public/creneaux/` | créneaux du rendez-vous découverte, sans aucune identité | public |
+| `POST v1/public/rendez-vous/` `{prenom, nom, email, telephone?, canal, date, heure, note?, confidentialite, cle_saisie}` | réservation ; réponse unique `{suite: "email"}` | public |
+| `POST`, `PUT v1/public/rendez-vous/gestion/` `{jeton, …}` | voir, déplacer, annuler par le lien reçu par e-mail ; invitation | le jeton du lien |
+| `POST`, `PUT v1/public/rendez-vous/espace/` `{billet, …}` | rendez-vous d'un parent inscrit : liste, créneaux, réserver, déplacer, annuler | un billet de l'API des parents |
+
+`POST v1/rendez-vous/`, `PUT v1/rendez-vous/`, `statut/` et `report/` acceptent `prevenir` (0|1) : la case « Prévenir le parent par e-mail ».
+
+- **Créneaux** : les plages hebdomadaires de chaque utilisateur qui tient l'agenda, moins ses absences et les rendez-vous qui tiennent (à confirmer, confirmé). Le créneau est revérifié sous un verrou au moment de la réservation : deux demandes simultanées, une seule passe ; l'autre reçoit les créneaux à jour.
+- **Réponse publique** : la même que l'adresse soit connue ou non. Une adresse qui a déjà un rendez-vous découverte à venir reçoit un e-mail qui le rappelle, sans second rendez-vous. Garde-fous : limiteur par adresse IP, champ leurre, clé de saisie, plafond de réservations sur 24 heures (au-delà, la page publique ne propose plus rien et l'onglet Connexions le signale).
+- **Le parent n'est prévenu que d'un créneau confirmé** : confirmation et modification (avec l'invitation `.ics` en pièce jointe), annulation, rappel la veille (passe `rdv-rappels`). Le responsable reçoit un avis quand un parent prend, déplace ou annule.
+- **Lien de gestion** : `…/rendez-vous#<jeton>` de l'appli des parents, posé dans l'e-mail à l'envoi. Il suit le rendez-vous déplacé, s'éteint quand l'adresse du dossier change. Annuler ou déplacer en ligne : jusqu'à `$_RDV_MODIFIABLE_HEURES` avant, `$_RDV_DEPLACEMENTS_MAX` déplacements.
+- **Flux d'agenda** : rendez-vous que l'utilisateur mène, de 30 jours en arrière à 6 mois en avant ; titre « Découverte · Sophie M. », ni nom complet, ni téléphone, ni note. Un calendrier le relit quelques fois par jour.
+- `php script-cgi/essai-rdv.php` : le scénario complet, contrôlé, sans rien envoyer (`--montrer` : l'e-mail et son invitation tels qu'ils partiraient).
 
 ## Profils et droits
 
@@ -374,6 +401,7 @@ Le cahier des charges (§22) interdit les secrets dans le code et demande de lim
 - Stripe : les clés du compte NavUp (`sk_live_…`, refusées tant que `$_PROD = 0`), le webhook déclaré et son secret, `$_URL_TOUR`, `$_URL_RETOUR_PAIEMENT` et l'origine de la landing page dans `$_CORS_ORIGINES_PUBLIQUES`.
 - E-mails : `$_MAIL_MODE = "reel"` une fois les textes validés et le domaine d'envoi configuré (SPF, DKIM).
 - La tâche planifiée dans la crontab, le dossier des médias créé et sauvegardé avec la base.
+- Rendez-vous en ligne : l'adresse de l'appli des parents (`$_APP_PARENTS_URL`, pour le lien de gestion), `$_URL_TOUR` (lien de l'avis au responsable et du flux), des plages réglées par qui reçoit, et un essai réel de l'invitation dans Gmail, Apple Mail et Outlook. Le flux d'agenda porte son jeton dans son adresse : le format de journal sans chaîne de requête, ci-dessous, vaut aussi pour lui.
 - À faire valider avant l'ouverture, hors code : CGV et droit de rétractation pour un accès immédiat, textes des e-mails.
 - HTTPS obligatoire. La double authentification est prévue avant l'ouverture aux données réelles (étape 8 de la feuille de route).
 - Journal d'accès d'Apache : la recherche envoie le terme saisi (un nom, un téléphone) dans l'URL de l'API. Utiliser un format de journal sans la chaîne de requête, par exemple `LogFormat "%h %l %u %t \"%m %U %H\" %>s %b" navup` puis `CustomLog … navup` dans l'hôte virtuel de l'API (`%U` est le chemin seul, `%r` contiendrait les paramètres).

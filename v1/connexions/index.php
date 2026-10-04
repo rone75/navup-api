@@ -10,6 +10,8 @@ include "../../include/package.contact.php";
 include "../../include/package.vente.php";
 include "../../include/package.suivi.php";
 include "../../include/package.message.php";
+include "../../include/package.ics.php";
+include "../../include/package.agenda.php";
 include "../../include/package.automate.php";
 include "../../include/package.stripe.php";
 include "../../include/package.connexions.php";

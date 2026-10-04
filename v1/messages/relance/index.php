@@ -9,6 +9,7 @@ include "../../../include/package.saisie.php";
 include "../../../include/package.contact.php";
 include "../../../include/package.vente.php";
 include "../../../include/package.message.php";
+include "../../../include/package.ics.php";
 include "../../../include/package.suivi.php";
 include "../../../include/package.automate.php";
 include "../../../include/package.stripe.php";
@@ -23,6 +24,8 @@ $U = new User();
 $S = new Saisie();
 $Contact = new Contact();
 $Message = new Message();
+// Un e-mail de rendez-vous relancé recompose son lien de gestion et son invitation
+$Rdv = new Rdv();
 $Vente = new Vente();
 $Stripe = new PaiementStripe();
 

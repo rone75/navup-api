@@ -12,6 +12,8 @@
 //              pages et liens de paiement, prélèvements, signaux Stripe, e-mails et compte ; les sujets et semaines
 //              d'essai de la formation (titre commençant par « Essai ») et leurs fichiers ; le limiteur d'adresses locales.
 //              Refusé en production ($_PROD = 1).
+//              Depuis l'étape 6b : les rendez-vous pris en ligne, leurs liens de gestion et ce que le parent a déclaré
+//              partent avec le dossier, les plages, absences et flux d'agenda d'un compte d'essai avec ce compte (cascades).
 // Usage:       php script-cgi/purge-essais.php
 //========================================================================
 

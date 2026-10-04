@@ -29,6 +29,7 @@ include __DIR__ . "/../include/package.contact.php";
 include __DIR__ . "/../include/package.vente.php";
 include __DIR__ . "/../include/package.suivi.php";
 include __DIR__ . "/../include/package.message.php";
+include __DIR__ . "/../include/package.ics.php";
 include_once __DIR__ . "/../include/package.formation.php";
 include __DIR__ . "/../include/package.automate.php";
 include __DIR__ . "/../include/package.stripe.php";
@@ -100,6 +101,13 @@ $PASSES = array(
         return nb($convertis, 'audio converti', 'audios convertis') . ", $erreurs en erreur";
     },
 
+    // Avant « messages » : un rappel déposé part dans le même passage
+    'rdv-rappels' => function () {
+        global $Rdv;
+
+        return nb($Rdv->rappeler(), 'rappel de rendez-vous déposé', 'rappels de rendez-vous déposés');
+    },
+
     'messages' => function () {
         global $Message;
 
@@ -119,6 +127,12 @@ $PASSES = array(
         $Mysql->execute("DELETE FROM e_limite WHERE date_fin < DATE_SUB(NOW(), INTERVAL 1 DAY)");
         $Mysql->execute("DELETE FROM e_session WHERE date_expiration < NOW()");
         $Mysql->execute("DELETE FROM a_jeton WHERE date_expiration < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+        // Rendez-vous en ligne : billets de l'espace personnel périmés, liens de gestion d'un rendez-vous passé depuis un mois
+        $Mysql->execute("DELETE FROM e_billet WHERE date_creation < DATE_SUB(NOW(), INTERVAL 1 DAY)");
+        $Mysql->execute(
+            "DELETE FROM r_lien WHERE NOT EXISTS (
+                SELECT 1 FROM r_rdv r WHERE r.id_rdv_origine = r_lien.id_rdv AND r.date_debut > DATE_SUB(NOW(), INTERVAL 30 DAY))"
+        );
 
         return nb(count($differences), 'tâche automatique ajustée', 'tâches automatiques ajustées');
     },

@@ -57,9 +57,20 @@ class Connexions
         );
     }
 
+    /** Réservations faites depuis la page publique en 24 heures, et le plafond au-delà duquel elle ne propose plus rien. */
+    public static function plafondRdv()
+    {
+        global $Mysql, $_RDV_PRISE_PLAFOND;
+
+        $nb = (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM r_reservation WHERE voie = 'public' AND date_creation > NOW() - INTERVAL 1 DAY")->n;
+        $plafond = isset($_RDV_PRISE_PLAFOND) ? (int) $_RDV_PRISE_PLAFOND : 0;
+
+        return array('reservations' => $nb, 'plafond' => $plafond, 'atteint' => $plafond > 0 && $nb >= $plafond);
+    }
+
     /**
      * Nombre de choses qui demandent un humain : signaux Stripe en erreur, e-mails en erreur, audios dont la conversion
-     * a échoué, passes en échec ; en production, la tâche planifiée en retard compte aussi (en développement, elle
+     * a échoué, plafond des rendez-vous en ligne atteint, passes en échec ; en production, la tâche planifiée en retard compte aussi (en développement, elle
      * se lance à la main).
      */
     public static function erreurs()
@@ -68,7 +79,9 @@ class Connexions
 
         $n = (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM s_evenement WHERE statut = 'erreur'")->n
             + (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM m_message WHERE etat = 'erreur'")->n
-            + (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM f_fichier WHERE etat = 'erreur'")->n;
+            + (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM f_fichier WHERE etat = 'erreur'")->n
+            // Plafond des réservations publiques atteint : la prise de rendez-vous en ligne s'est fermée, quelqu'un doit regarder
+            + (self::plafondRdv()['atteint'] ? 1 : 0);
         $planifie = self::planifie();
         foreach ($planifie['passes'] as $p) {
             if ($p['echec']) {
@@ -185,6 +198,40 @@ class Connexions
                        AND NOT EXISTS (SELECT 1 FROM e_acces e WHERE e.id_compte = a.id_compte)"
                 )->n,
             ),
+            'rdv' => self::rdv(),
+        );
+    }
+
+    /**
+     * Rendez-vous en ligne : la prise est-elle ouverte, qui reçoit, combien de créneaux sont proposés, où en est le
+     * plafond des réservations publiques, combien de calendriers sont abonnés. Des nombres, aucune donnée de dossier.
+     */
+    public static function rdv()
+    {
+        global $Mysql, $_RDV_PRISE_OUVERTE;
+
+        $profils = "'" . implode("', '", Suivi::profils('rendez_vous')) . "'";
+        $receveurs = "u.actif = 1 AND u.profil IN ($profils) AND EXISTS (SELECT 1 FROM r_disponibilite d WHERE d.id_users = u.id_users)";
+        $agenda = class_exists('Agenda', false) ? new Agenda() : null;
+
+        return array(
+            'ouverte' => !empty($_RDV_PRISE_OUVERTE),
+            'plafond' => self::plafondRdv(),
+            'receveurs' => (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM u_users u WHERE $receveurs")->n,
+            'sans_visio' => (int) $Mysql->fetchOne(
+                "SELECT COUNT(*) AS n FROM u_users u LEFT JOIN u_agenda a ON a.id_users = u.id_users
+                 WHERE $receveurs AND (a.lien_visio IS NULL OR a.lien_visio = '')"
+            )->n,
+            // Créneaux proposés à cet instant : sur la page publique (découverte), dans l'espace des parents (accompagnement)
+            'creneaux' => $agenda === null ? null : array(
+                'decouverte' => count($agenda->libres('decouverte')),
+                'suivi' => count($agenda->libres('suivi')),
+            ),
+            'a_venir' => (int) $Mysql->fetchOne(
+                "SELECT COUNT(*) AS n FROM r_rdv r INNER JOIN r_reservation v ON v.id_rdv = r.id_rdv_origine
+                 WHERE r.statut IN ('a_confirmer', 'confirme') AND r.date_debut > NOW()"
+            )->n,
+            'flux' => (int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM u_agenda a INNER JOIN u_users u ON u.id_users = a.id_users WHERE a.jeton IS NOT NULL AND u.actif = 1")->n,
         );
     }
 
@@ -206,7 +253,7 @@ class Connexions
         }
         $de = (isset($_MAIL_EXPEDITEUR) && $_MAIL_EXPEDITEUR !== '') ? $_MAIL_EXPEDITEUR : "noreply@navup.fr";
         $entetes = 'From: "NavUp" <' . $de . ">\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\nContent-Transfer-Encoding: 8bit\r\n";
-        $corps = ($n > 1 ? "$n éléments demandent" : "1 élément demande") . " votre attention dans la Tour de contrôle NavUp (paiements Stripe, e-mails, médias ou tâche planifiée).\r\n"
+        $corps = ($n > 1 ? "$n éléments demandent" : "1 élément demande") . " votre attention dans la Tour de contrôle NavUp (paiements Stripe, e-mails, médias, rendez-vous en ligne ou tâche planifiée).\r\n"
             . (isset($_URL_TOUR) ? "Détail : " . rtrim($_URL_TOUR, '/') . "/parametres/connexions\r\n" : '');
         if (!@mail($_MAIL_ERREUR, "NavUp : connexions en erreur", $corps, $entetes)) {
             return ($n > 1 ? "$n éléments" : "1 élément") . " en erreur, le mail d'alerte n'est pas parti";

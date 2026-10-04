@@ -169,10 +169,11 @@ class Rdv
     );
 
     // Du dossier, l'identité seulement. Les textes sont lus ici pour les écritures ; sortie() ne les sert qu'avec le droit famille.
-    const COLONNES = "r.id_rdv, r.id_contact, r.id_rdv_precedent, r.type, r.statut, r.date_statut, r.date_debut, r.duree, r.date_fin, r.canal,
-        r.motif, r.motif_cloture, r.compte_rendu, r.date_compte_rendu, r.id_users_responsable, r.id_users, r.date_creation, r.date_modif,
+    const COLONNES = "r.id_rdv, r.id_contact, r.id_rdv_precedent, r.id_rdv_origine, r.rang, r.type, r.statut, r.date_statut, r.date_debut, r.duree, r.date_fin, r.canal,
+        r.prevenir, r.motif, r.motif_cloture, r.compte_rendu, r.date_compte_rendu, r.id_users_responsable, r.id_users, r.date_creation, r.date_modif,
         (SELECT s.id_rdv FROM r_rdv s WHERE s.id_rdv_precedent = r.id_rdv) AS id_rdv_suivant,
-        c.prenom, c.nom, c.telephone, c.statut AS contact_statut, c.date_archivage AS contact_date_archivage,
+        (SELECT v.voie FROM r_reservation v WHERE v.id_rdv = r.id_rdv_origine) AS voie,
+        c.prenom, c.nom, c.telephone, c.email, c.statut AS contact_statut, c.date_archivage AS contact_date_archivage,
         ur.identifiant AS responsable_identifiant, ur.prenom AS responsable_prenom, ur.nom AS responsable_nom,
         ua.identifiant AS auteur_identifiant, ua.prenom AS auteur_prenom, ua.nom AS auteur_nom,
         uc.identifiant AS redacteur_identifiant, uc.prenom AS redacteur_prenom, uc.nom AS redacteur_nom";
@@ -232,6 +233,11 @@ class Rdv
             'duree' => (int) $r->duree,
             'date_fin' => $r->date_fin,
             'canal' => $r->canal,
+            // Le choix de la case « Prévenir le parent par e-mail », et s'il a une adresse où le prévenir
+            'prevenir' => (int) $r->prevenir === 1,
+            'parent_joignable' => $r->email !== null && $r->email !== '',
+            // Pris en ligne par le parent : depuis la page publique ou son espace personnel ; sinon null
+            'en_ligne' => $r->voie,
             'commence' => $r->date_debut !== null && $r->date_debut <= $maintenant,
             'passe' => $r->date_fin !== null && $r->date_fin < $maintenant,
             'a_compte_rendu' => $r->compte_rendu !== null,
@@ -406,14 +412,43 @@ class Rdv
     // ÉCRITURES ######################################################
 
     /** Trace un fait de rendez-vous : journal d'audit et fil du dossier (module rendez_vous). Codes seulement. */
-    private function tracer($id_contact, $id_rdv, $action_audit, $fait, $details, $id_users, $date = null)
+    private function tracer($id_contact, $id_rdv, $action_audit, $fait, $details, $id_users, $date = null, $origine = 'utilisateur')
     {
         global $Contact;
 
         $Contact->tracer($id_contact, $id_users, $action_audit, array_merge(array('id_rdv' => (int) $id_rdv), $details), array(
             'type' => 'rdv', 'module' => 'rendez_vous', 'objet_type' => 'rdv', 'objet_id' => (int) $id_rdv,
-            'details' => array_merge(array('action' => $fait), $details), 'date' => $date,
+            'details' => array_merge(array('action' => $fait), $details), 'date' => $date, 'origine' => $origine,
         ));
+    }
+
+    /** Origine d'un fait d'après les options d'une écriture : « parent » pour un geste fait en ligne, sinon l'utilisateur. */
+    private static function origine($options)
+    {
+        return (isset($options['origine']) && $options['origine'] === 'parent') ? 'parent' : 'utilisateur';
+    }
+
+    /**
+     * Verrou d'agenda : toute écriture qui fait tenir un créneau le prend AVANT d'ouvrir sa transaction et le rend
+     * après l'avoir validée. Il met à la file les réservations en ligne (qui refusent un créneau pris) et les saisies
+     * de l'outil (qui avertissent sans refuser). Ordre des verrous, partout : adresse e-mail, agenda, dossier.
+     * Un script qui s'arrête le rend avec sa connexion.
+     */
+    public function prendreAgenda()
+    {
+        global $Mysql, $Response;
+
+        $pris = $Mysql->fetchOne("SELECT GET_LOCK('navup_agenda', 10) AS pris");
+        if ($pris === null || (int) $pris->pris !== 1) {
+            $Response->validationError("L'agenda est occupé par une autre écriture : réessayez dans un instant.");
+        }
+    }
+
+    public function rendreAgenda()
+    {
+        global $Mysql;
+
+        $Mysql->fetchOne("SELECT RELEASE_LOCK('navup_agenda') AS rendu");
     }
 
     /**
@@ -462,19 +497,40 @@ class Rdv
     /**
      * Enregistre un rendez-vous. $debut null : une demande sans créneau ; sinon $statut vaut a_confirmer ou confirme.
      * $data : champs de spec(). Retourne array(id_rdv, avertissements, deja).
+     * Enveloppe de inscrire() : verrou d'agenda, verrou du dossier, transaction.
      */
-    public function creer($contact, $data, $debut, $statut, $cle, $id_users)
+    public function creer($contact, $data, $debut, $statut, $cle, $id_users, $options = array())
     {
-        global $SQL, $Mysql, $S, $Contact, $Tache;
+        global $SQL, $Contact;
+
+        $this->prendreAgenda();
+        try {
+            $Contact->verrouiller((int) $contact->id_contact);
+            $res = $this->inscrire($contact, $data, $debut, $statut, $cle, $id_users, $options);
+            $SQL->commit();
+        } finally {
+            $this->rendreAgenda();
+        }
+
+        $this->expedier((int) $contact->id_contact);
+
+        return $res;
+    }
+
+    /**
+     * Écriture d'un rendez-vous, sans transaction : l'appelant tient le verrou d'agenda, celui du dossier et la
+     * transaction (la réservation en ligne y écrit aussi le dossier, le consentement et ce que le parent a déclaré).
+     * $options : origine ('parent' pour une réservation en ligne), prevenir (case « Prévenir le parent par e-mail »).
+     */
+    public function inscrire($contact, $data, $debut, $statut, $cle, $id_users, $options = array())
+    {
+        global $Mysql, $S, $Tache;
 
         $idc = (int) $contact->id_contact;
-        $Contact->verrouiller($idc);
 
         if ($cle !== null) {
             $deja = $Mysql->fetchOne("SELECT id_rdv FROM r_rdv WHERE cle_saisie = ?", array($cle), 's');
             if ($deja !== null) {
-                $SQL->commit();
-
                 return array('id_rdv' => (int) $deja->id_rdv, 'avertissements' => array(), 'deja' => true);
             }
         }
@@ -490,15 +546,44 @@ class Rdv
             'date_debut' => $debut,
             'duree' => $data['duree'],
             'canal' => $data['canal'],
+            'prevenir' => empty($options['prevenir']) ? 0 : 1,
             'motif' => $data['motif'] ?? null,
             'id_users_responsable' => $data['id_users_responsable'] ?? $id_users,
             'cle_saisie' => $cle,
             'id_users' => $id_users,
         ));
-        $this->tracer($idc, $idr, 'rdv_create', 'creation', array('statut' => $statut), $id_users);
+        // Premier de sa chaîne : il en est l'origine
+        $Mysql->execute("UPDATE r_rdv SET id_rdv_origine = id_rdv WHERE id_rdv = ?", array($idr), 'i');
+
+        // Ce que le parent a déclaré en réservant : gardé tel quel, à côté du rendez-vous
+        if (!empty($options['reservation'])) {
+            $v = $options['reservation'];
+            $S->inserer('r_reservation', array(
+                'id_rdv' => $idr,
+                'voie' => $v['voie'],
+                'prenom' => $v['prenom'] ?? null,
+                'nom' => $v['nom'] ?? null,
+                'email' => $v['email'] ?? null,
+                'telephone' => $v['telephone'] ?? null,
+                'note' => $v['note'] ?? null,
+            ));
+        }
+
+        $origine = self::origine($options);
+        $details = array('statut' => $statut);
+        if (!empty($options['reservation'])) {
+            $details['via'] = $options['reservation']['voie'];
+        }
+        $this->tracer($idc, $idr, 'rdv_create', 'creation', $details, $id_users, null, $origine);
         $this->automatismes($idc, $statut, $debut, $id_users);
         $Tache->synchroniser($idc);
-        $SQL->commit();
+
+        if ($statut === 'confirme' && $debut > date('Y-m-d H:i:s') && !empty($options['prevenir'])) {
+            $this->notifier($idr, 'rdv_confirmation', array(), $options, $id_users);
+        }
+        if ($origine === 'parent') {
+            $this->aviser($idr, 'pris');
+        }
 
         return array('id_rdv' => $idr, 'avertissements' => $avertissements, 'deja' => false);
     }
@@ -521,8 +606,15 @@ class Rdv
             $this->tracer($idc, $r->id_rdv, 'rdv_update', 'modification', array('champs' => $modifies), $id_users);
             // La durée décide de l'heure de fin, donc du moment où le compte rendu est attendu
             $Tache->synchroniser($idc);
+
+            // Le parent qui tient un créneau confirmé apprend que sa durée ou son canal a changé
+            $prevenir = array_key_exists('prevenir', $data) ? (int) $data['prevenir'] === 1 : (int) $r->prevenir === 1;
+            if ($prevenir && $r->statut === 'confirme' && $r->date_debut > date('Y-m-d H:i:s') && count(array_intersect($modifies, array('canal', 'duree'))) > 0) {
+                $this->notifier((int) $r->id_rdv, 'rdv_modification', array(), array(), $id_users);
+            }
         }
         $SQL->commit();
+        $this->expedier($idc);
 
         return $modifies;
     }
@@ -530,22 +622,39 @@ class Rdv
     /**
      * Seul point d'écriture de r_rdv.statut, avec replanifier(). Sans effet si le statut ne change pas.
      * $options : debut (créneau d'une demande qu'on planifie), duree, motif_cloture (annulation, absence),
-     * compte_rendu (avec « effectué »). Un créneau fixé ne se modifie pas ici : il se déplace par replanifier().
-     * Retourne les avertissements.
+     * compte_rendu (avec « effectué »), prevenir (case « Prévenir le parent par e-mail » : absente, le choix gardé
+     * par le rendez-vous vaut), origine. Un créneau fixé ne se modifie pas ici : il se déplace par replanifier().
+     * Retourne les avertissements. Enveloppe de ecrireStatut().
      */
     public function changerStatut($rdv, $nouveau, $options, $id_users)
     {
-        global $SQL, $S, $Contact, $Interaction, $Tache, $Response;
+        global $SQL, $Contact;
+
+        $this->prendreAgenda();
+        try {
+            $Contact->verrouiller((int) $rdv->id_contact);
+            $avertissements = $this->ecrireStatut($rdv, $nouveau, $options, $id_users);
+            $SQL->commit();
+        } finally {
+            $this->rendreAgenda();
+        }
+
+        $this->expedier((int) $rdv->id_contact);
+
+        return $avertissements;
+    }
+
+    /** Changement de statut, sans transaction : l'appelant tient les verrous (agenda, dossier) et la transaction. */
+    public function ecrireStatut($rdv, $nouveau, $options, $id_users)
+    {
+        global $S, $Interaction, $Tache, $Response;
 
         $idc = (int) $rdv->id_contact;
-        $Contact->verrouiller($idc);
         $r = $this->charger($rdv->id_rdv);
         $ancien = $r->statut;
         $maintenant = date('Y-m-d H:i:s');
 
         if ($ancien === $nouveau) {
-            $SQL->commit();
-
             return array();
         }
         if (!in_array($nouveau, self::TRANSITIONS[$ancien], true)) {
@@ -553,6 +662,9 @@ class Rdv
         }
 
         $set = array('statut' => $nouveau, 'date_statut' => $maintenant);
+        if (array_key_exists('prevenir', $options) && $options['prevenir'] !== null) {
+            $set['prevenir'] = empty($options['prevenir']) ? 0 : 1;
+        }
         $debut = $r->date_debut;
         $details = array('avant' => $ancien, 'apres' => $nouveau);
         $avertissements = array();
@@ -574,6 +686,8 @@ class Rdv
             } elseif (in_array($ancien, self::PREVUS, true)) {
                 $fait = $nouveau === 'confirme' ? 'confirmation' : 'a_confirmer';
             } else {
+                // Rétabli à son créneau : un autre rendez-vous a pu le prendre entre-temps
+                $avertissements = $this->avertissements($debut, (int) $r->duree, (int) $r->id_rdv);
                 $fait = 'retablissement';
             }
             $set['motif_cloture'] = null;
@@ -603,7 +717,7 @@ class Rdv
         }
 
         $S->mettreAJour('r_rdv', 'id_rdv', (int) $r->id_rdv, $set);
-        $this->tracer($idc, $r->id_rdv, 'rdv_statut', $fait, $details, $id_users, $dateFait);
+        $this->tracer($idc, $r->id_rdv, 'rdv_statut', $fait, $details, $id_users, $dateFait, self::origine($options));
 
         if (in_array($nouveau, self::PREVUS, true)) {
             $this->automatismes($idc, $nouveau, $debut, $id_users);
@@ -612,7 +726,20 @@ class Rdv
             $Interaction->recalculerDerniere($idc);
         }
         $Tache->synchroniser($idc);
-        $SQL->commit();
+
+        // Le parent n'est prévenu que d'un créneau confirmé, à venir : il se confirme, ou il s'annule après l'avoir été
+        $parent = self::origine($options) === 'parent';
+        $prevenir = isset($set['prevenir']) ? $set['prevenir'] === 1 : (int) $r->prevenir === 1;
+        if ($prevenir && $debut !== null && $debut > $maintenant) {
+            if ($nouveau === 'confirme') {
+                $this->notifier((int) $r->id_rdv, 'rdv_confirmation', array(), $options, $id_users);
+            } elseif ($nouveau === 'annule' && ($ancien === 'confirme' || $parent)) {
+                $this->notifier((int) $r->id_rdv, 'rdv_annulation', array(), $options, $id_users);
+            }
+        }
+        if ($parent && $nouveau === 'annule') {
+            $this->aviser((int) $r->id_rdv, 'annule');
+        }
 
         return $avertissements;
     }
@@ -621,19 +748,39 @@ class Rdv
      * Déplace un rendez-vous (CDC §11 : replanifier sans perdre l'historique) : un nouveau rendez-vous, chaîné à
      * l'ancien, prend le nouveau créneau. L'ancien garde le sien ; il devient « reporté » s'il tenait encore,
      * et reste « absent » ou « annulé » sinon. Un rendez-vous n'a qu'un successeur : un double envoi rend le premier.
-     * Retourne array(id_rdv, avertissements, deja).
+     * Retourne array(id_rdv, avertissements, deja). Enveloppe de ecrireReport().
      */
-    public function replanifier($rdv, $debut, $duree, $statut, $id_users)
+    public function replanifier($rdv, $debut, $duree, $statut, $id_users, $options = array())
     {
-        global $SQL, $Mysql, $S, $Contact, $Tache, $Response;
+        global $SQL, $Contact;
+
+        $this->prendreAgenda();
+        try {
+            $Contact->verrouiller((int) $rdv->id_contact);
+            $res = $this->ecrireReport($rdv, $debut, $duree, $statut, $id_users, $options);
+            $SQL->commit();
+        } finally {
+            $this->rendreAgenda();
+        }
+
+        $this->expedier((int) $rdv->id_contact);
+
+        return $res;
+    }
+
+    /**
+     * Déplacement, sans transaction : l'appelant tient les verrous (agenda, dossier) et la transaction.
+     * $options : origine, prevenir (absente : le choix de l'ancien créneau suit), responsable (celui qui est libre
+     * au nouveau créneau, pour un déplacement fait en ligne).
+     */
+    public function ecrireReport($rdv, $debut, $duree, $statut, $id_users, $options = array())
+    {
+        global $Mysql, $S, $Tache, $Response;
 
         $idc = (int) $rdv->id_contact;
-        $Contact->verrouiller($idc);
         $r = $this->charger($rdv->id_rdv);
 
         if ($r->id_rdv_suivant !== null) {
-            $SQL->commit();
-
             return array('id_rdv' => (int) $r->id_rdv_suivant, 'avertissements' => array(), 'deja' => true);
         }
         if ($r->date_debut === null || !in_array($r->statut, array('a_confirmer', 'confirme', 'absent', 'annule'), true)) {
@@ -646,27 +793,318 @@ class Rdv
         $duree = $duree === null ? (int) $r->duree : (int) $duree;
         $avertissements = $this->avertissements($debut, $duree, (int) $r->id_rdv);
 
+        $prevenir = (array_key_exists('prevenir', $options) && $options['prevenir'] !== null) ? (empty($options['prevenir']) ? 0 : 1) : (int) $r->prevenir;
+        $responsable = array_key_exists('responsable', $options)
+            ? ($options['responsable'] === null ? null : (int) $options['responsable'])
+            : ($r->id_users_responsable === null ? null : (int) $r->id_users_responsable);
+
         $idn = $S->inserer('r_rdv', array(
             'id_contact' => $idc,
             'id_rdv_precedent' => (int) $r->id_rdv,
+            'id_rdv_origine' => (int) ($r->id_rdv_origine ?? $r->id_rdv),
+            'rang' => (int) $r->rang + 1,
             'type' => $r->type,
             'statut' => $statut,
             'date_debut' => $debut,
             'duree' => $duree,
             'canal' => $r->canal,
+            'prevenir' => $prevenir,
             'motif' => $r->motif,
-            'id_users_responsable' => $r->id_users_responsable === null ? null : (int) $r->id_users_responsable,
+            'id_users_responsable' => $responsable,
             'id_users' => $id_users,
         ));
         if (in_array($r->statut, self::PREVUS, true)) {
             $Mysql->execute("UPDATE r_rdv SET statut = 'reporte', date_statut = NOW(), date_modif = NOW() WHERE id_rdv = ?", array((int) $r->id_rdv), 'i');
         }
-        $this->tracer($idc, $idn, 'rdv_report', 'report', array('id_precedent' => (int) $r->id_rdv, 'statut' => $statut), $id_users);
+        $this->tracer($idc, $idn, 'rdv_report', 'report', array('id_precedent' => (int) $r->id_rdv, 'statut' => $statut), $id_users, null, self::origine($options));
         $this->automatismes($idc, $statut, $debut, $id_users);
         $Tache->synchroniser($idc);
-        $SQL->commit();
+
+        // Le parent tenait un créneau confirmé : il apprend qu'il a bougé, même si le nouveau reste à confirmer.
+        // Un rendez-vous replanifié après une annulation ou une absence s'annonce comme un nouveau créneau.
+        $maintenant = date('Y-m-d H:i:s');
+        $tenait = $r->statut === 'confirme' && $r->date_debut > $maintenant;
+        if ($prevenir === 1 && $debut > $maintenant) {
+            if ($statut === 'confirme') {
+                $this->notifier($idn, $tenait ? 'rdv_modification' : 'rdv_confirmation', $tenait ? array('ancien_debut' => $r->date_debut) : array(), $options, $id_users);
+            } elseif ($tenait) {
+                $this->notifier($idn, 'rdv_modification', array('ancien_debut' => $r->date_debut, 'a_confirmer' => true), $options, $id_users);
+            }
+        }
+        if (self::origine($options) === 'parent') {
+            $this->aviser($idn, 'deplace', array('ancien_debut' => $r->date_debut));
+        }
 
         return array('id_rdv' => $idn, 'avertissements' => $avertissements, 'deja' => false);
+    }
+
+    // PRÉVENIR ET LAISSER LA MAIN AU PARENT (étape 6b) ###############
+
+    /** Ce que le parent a déclaré en réservant en ligne (r_reservation), ou null pour un rendez-vous saisi dans l'outil. */
+    public function reservation($r)
+    {
+        global $Mysql;
+
+        return $Mysql->fetchOne("SELECT * FROM r_reservation WHERE id_rdv = ?", array((int) ($r->id_rdv_origine ?? $r->id_rdv)), 'i');
+    }
+
+    /** Lien de visio de la personne qui mène le rendez-vous, ou null. */
+    public function lienVisio($r)
+    {
+        global $Mysql;
+
+        if ($r->canal !== 'visio' || $r->id_users_responsable === null) {
+            return null;
+        }
+        $a = $Mysql->fetchOne("SELECT lien_visio FROM u_agenda WHERE id_users = ?", array((int) $r->id_users_responsable), 'i');
+
+        return ($a === null || $a->lien_visio === '') ? null : $a->lien_visio;
+    }
+
+    /**
+     * Dépose l'e-mail au parent que cause un fait de rendez-vous, dans la transaction de ce fait : pas de message
+     * sans fait, pas de fait sans message. Sans effet si l'endpoint n'a pas chargé les e-mails.
+     * $plus : ancien_debut (déplacement), a_confirmer.
+     */
+    private function notifier($id_rdv, $modele, $plus, $options, $id_users)
+    {
+        global $Message, $Contact, $_APP_PARENTS_URL, $_RDV_MODIFIABLE_HEURES;
+
+        if (!isset($Message)) {
+            return;
+        }
+        $r = $this->charger($id_rdv);
+        $reservation = $this->reservation($r);
+        $appli = (isset($_APP_PARENTS_URL) && $_APP_PARENTS_URL !== '') ? $_APP_PARENTS_URL : null;
+        $parent = self::origine($options) === 'parent';
+
+        $Message->deposer($Contact->charger($r->id_contact), $modele, array_merge(array(
+            'type' => $r->type,
+            'date_debut' => $r->date_debut,
+            'duree' => (int) $r->duree,
+            'canal' => $r->canal,
+            'visio' => $this->lienVisio($r),
+            'gestion' => $appli !== null,
+            'heures' => (int) $_RDV_MODIFIABLE_HEURES,
+            'appli' => $appli,
+            // Pris sur la page publique : l'adresse n'est pas prouvée, l'e-mail ne recopie rien de la saisie
+            'inconnu' => $reservation !== null && $reservation->voie === 'public',
+            'par_parent' => $parent,
+        ), $plus), 'rdv:' . $modele . ':' . (int) $id_rdv . ':' . date('YmdHis'), array(
+            'objet_type' => 'rdv', 'objet_id' => (int) $id_rdv,
+            'origine' => ($parent || $id_users === null) ? 'automatique' : 'utilisateur', 'id_users' => $id_users,
+        ));
+    }
+
+    /**
+     * Prévient la personne qui mène le rendez-vous de ce qu'un parent vient de faire en ligne ($fait : pris, deplace,
+     * annule) : un calendrier abonné ne se met à jour que quelques fois par jour. L'avis ne dit que ce que montre le
+     * flux d'agenda : type, prénom et initiale, créneau, canal, lien vers la fiche.
+     */
+    private function aviser($id_rdv, $fait, $plus = array())
+    {
+        global $Message, $Mysql, $_URL_TOUR;
+
+        if (!isset($Message)) {
+            return;
+        }
+        $r = $this->charger($id_rdv);
+        $u = $r->id_users_responsable === null ? null : $Mysql->fetchOne(
+            "SELECT prenom, email FROM u_users WHERE id_users = ? AND actif = 1",
+            array((int) $r->id_users_responsable),
+            'i'
+        );
+        if ($u === null) {
+            return;
+        }
+        $canaux = array('visio' => 'en visio', 'telephone' => 'par téléphone', 'presentiel' => 'en personne');
+        $destinataire = (object) array('id_contact' => (int) $r->id_contact, 'prenom' => $u->prenom, 'email' => $u->email);
+
+        $Message->deposer($destinataire, 'rdv_avis', array_merge(array(
+            'fait' => $fait,
+            'titre' => self::titre($r),
+            'date_debut' => $r->date_debut,
+            'duree' => (int) $r->duree,
+            'canal_libelle' => $canaux[$r->canal],
+            'fiche' => (isset($_URL_TOUR) && $_URL_TOUR !== '') ? $_URL_TOUR . 'rendez-vous/' . (int) $id_rdv : null,
+            'a_relancer' => $fait === 'annule' && $this->proposition($r->id_contact) === 'a_relancer',
+        ), $plus), 'rdv:rdv_avis:' . (int) $id_rdv . ':' . $fait . ':' . date('YmdHis'), array('objet_type' => 'rdv', 'objet_id' => (int) $id_rdv));
+    }
+
+    /** « Découverte · Sophie M. » : type, prénom et initiale du nom. C'est tout ce qui sort du dossier vers un calendrier ou un avis. */
+    public static function titre($r)
+    {
+        $types = array('decouverte' => 'Découverte', 'suivi' => 'Accompagnement', 'bilan' => 'Bilan', 'autre' => 'Rendez-vous');
+        $initiale = mb_strtoupper(mb_substr(trim((string) $r->nom), 0, 1));
+        $qui = trim(trim((string) $r->prenom) . ($initiale !== '' ? ' ' . $initiale . '.' : ''));
+
+        return $types[$r->type] . ($qui !== '' ? ' · ' . $qui : '');
+    }
+
+    /** Envoie ce qui vient d'être déposé pour un dossier, une fois l'écriture validée. Sans effet sans les e-mails. */
+    public function expedier($id_contact)
+    {
+        global $Message;
+
+        if (isset($Message)) {
+            $Message->envoyerEnAttente((int) $id_contact);
+        }
+    }
+
+    /**
+     * Rappels (passe « rdv-rappels » de la tâche planifiée) : un e-mail avant chaque rendez-vous confirmé dont le
+     * parent est prévenu. Pas de rappel pour un rendez-vous confirmé peu avant son heure : la confirmation en tient lieu.
+     * Un seul rappel par rendez-vous (clé du message). Retourne le nombre de rappels déposés.
+     */
+    public function rappeler()
+    {
+        global $SQL, $Mysql, $Contact, $_RDV_RAPPEL_HEURES, $_RDV_RAPPEL_PRIS_AVANT_HEURES;
+
+        $n = 0;
+        foreach ($Mysql->fetchAll(
+            "SELECT r.id_rdv, r.id_contact FROM r_rdv r
+             WHERE r.statut = 'confirme' AND r.prevenir = 1 AND r.date_debut > NOW() AND r.date_debut <= NOW() + INTERVAL ? HOUR
+               AND r.date_statut <= r.date_debut - INTERVAL ? HOUR
+               AND NOT EXISTS (SELECT 1 FROM m_message m WHERE m.cle = CONCAT('rdv:rdv_rappel:', r.id_rdv))
+             ORDER BY r.date_debut",
+            array((int) $_RDV_RAPPEL_HEURES, (int) $_RDV_RAPPEL_PRIS_AVANT_HEURES),
+            'ii'
+        ) as $ligne) {
+            $Contact->verrouiller((int) $ligne->id_contact);
+            $r = $this->charger($ligne->id_rdv);
+            if ($r !== null && $r->statut === 'confirme' && $this->deposerRappel($r)) {
+                $n++;
+            }
+            $SQL->commit();
+        }
+
+        return $n;
+    }
+
+    private function deposerRappel($r)
+    {
+        global $Message, $Contact, $_APP_PARENTS_URL, $_RDV_MODIFIABLE_HEURES;
+
+        $reservation = $this->reservation($r);
+        $appli = (isset($_APP_PARENTS_URL) && $_APP_PARENTS_URL !== '') ? $_APP_PARENTS_URL : null;
+
+        return $Message->deposer($Contact->charger($r->id_contact), 'rdv_rappel', array(
+            'type' => $r->type, 'date_debut' => $r->date_debut, 'duree' => (int) $r->duree, 'canal' => $r->canal,
+            'visio' => $this->lienVisio($r), 'gestion' => $appli !== null, 'heures' => (int) $_RDV_MODIFIABLE_HEURES,
+            'inconnu' => $reservation !== null && $reservation->voie === 'public',
+        ), 'rdv:rdv_rappel:' . (int) $r->id_rdv, array('objet_type' => 'rdv', 'objet_id' => (int) $r->id_rdv)) !== null;
+    }
+
+    /**
+     * Crée un lien de gestion pour la chaîne d'un rendez-vous et rend son adresse ; null si l'appli des parents n'a pas
+     * d'adresse. Seule l'empreinte du jeton est gardée : l'adresse ne se relit nulle part. Appelé à l'envoi d'un e-mail.
+     */
+    public function lienGestion($r)
+    {
+        global $Mysql, $_APP_PARENTS_URL;
+
+        if (!isset($_APP_PARENTS_URL) || $_APP_PARENTS_URL === '') {
+            return null;
+        }
+        $jeton = bin2hex(random_bytes(24));
+        $Mysql->execute(
+            "INSERT INTO r_lien (id_rdv, jeton) VALUES (?, ?)",
+            array((int) ($r->id_rdv_origine ?? $r->id_rdv), hash('sha256', $jeton)),
+            'is'
+        );
+
+        return $_APP_PARENTS_URL . 'rendez-vous#' . $jeton;
+    }
+
+    /**
+     * Rendez-vous que désigne un jeton de gestion : le dernier créneau de sa chaîne (le lien suit le rendez-vous déplacé).
+     * null si le jeton est inconnu ou révoqué.
+     */
+    public function parJeton($jeton)
+    {
+        global $Mysql;
+
+        if (!is_string($jeton) || preg_match('/^[0-9a-f]{48}$/', $jeton) !== 1) {
+            return null;
+        }
+        $lien = $Mysql->fetchOne("SELECT id_rdv FROM r_lien WHERE jeton = ? AND date_revocation IS NULL", array(hash('sha256', $jeton)), 's');
+        if ($lien === null) {
+            return null;
+        }
+
+        return $this->dernier((int) $lien->id_rdv);
+    }
+
+    /** Dernier créneau d'une chaîne, d'après son origine. */
+    public function dernier($id_origine)
+    {
+        global $Mysql;
+
+        return $Mysql->fetchOne(
+            "SELECT " . self::COLONNES . self::SQL_FROM . " WHERE r.id_rdv_origine = ? ORDER BY r.rang DESC LIMIT 1",
+            array((int) $id_origine),
+            'i'
+        );
+    }
+
+    /** Révoque les liens de gestion des rendez-vous d'un dossier : son adresse e-mail vient de changer. Sans transaction. */
+    public function revoquerLiens($id_contact)
+    {
+        global $Mysql;
+
+        return $Mysql->execute(
+            "UPDATE r_lien l INNER JOIN r_rdv r ON r.id_rdv = l.id_rdv SET l.date_revocation = NOW()
+             WHERE r.id_contact = ? AND l.date_revocation IS NULL",
+            array((int) $id_contact),
+            'i'
+        );
+    }
+
+    /**
+     * Ce que le parent peut encore faire lui-même sur un rendez-vous : array(annulable, deplacable).
+     * Jusqu'au délai avant l'heure dite ; un déplacement demande aussi que le type se prenne en ligne et que le
+     * nombre de déplacements ne soit pas atteint.
+     */
+    public function gestesParent($r)
+    {
+        global $_RDV_MODIFIABLE_HEURES, $_RDV_DEPLACEMENTS_MAX, $_RDV_PRISE;
+
+        $tient = in_array($r->statut, self::PREVUS, true) && $r->date_debut !== null
+            && $r->date_debut > date('Y-m-d H:i:s', time() + (int) $_RDV_MODIFIABLE_HEURES * 3600);
+
+        return array(
+            'annulable' => $tient,
+            'deplacable' => $tient && isset($_RDV_PRISE[$r->type]) && (int) $r->rang < (int) $_RDV_DEPLACEMENTS_MAX,
+        );
+    }
+
+    /**
+     * Rendez-vous tel que le parent le voit (page de gestion, espace personnel) : ni note, ni nom d'utilisateur.
+     * Un rendez-vous passé se dit « passé », qu'il ait eu lieu ou non : rien n'est mesuré du parent.
+     */
+    public function sortieParent($r)
+    {
+        $maintenant = date('Y-m-d H:i:s');
+        if ($r->statut === 'annule') {
+            $etat = 'annule';
+        } elseif (($r->date_fin !== null && $r->date_fin < $maintenant) || in_array($r->statut, array('effectue', 'absent'), true)) {
+            $etat = 'passe';
+        } else {
+            $etat = $r->statut === 'confirme' ? 'confirme' : 'a_confirmer';
+        }
+        $gestes = in_array($etat, array('confirme', 'a_confirmer'), true) ? $this->gestesParent($r) : array('annulable' => false, 'deplacable' => false);
+
+        return array(
+            'id_rdv' => (int) $r->id_rdv,
+            'type' => $r->type,
+            'etat' => $etat,
+            'date_debut' => $r->date_debut,
+            'duree' => (int) $r->duree,
+            'canal' => $r->canal,
+            'visio' => $etat === 'confirme' ? $this->lienVisio($r) : null,
+            'annulable' => $gestes['annulable'],
+            'deplacable' => $gestes['deplacable'],
+        );
     }
 
     /** Écrit, corrige ou retire (texte null) le compte rendu d'un rendez-vous effectué. */

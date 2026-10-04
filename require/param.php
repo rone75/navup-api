@@ -46,8 +46,23 @@ $_LIEN_ACCES_REINIT_MINUTES = 60;          // lien « mot de passe oublié »
 $_LIMITE_ACCES = array(10, 15);            // demandes de lien depuis une adresse IP : array(nombre maximal, fenêtre en minutes)
 $_ACCES_MAX_PAR_JOUR = 3;                  // liens envoyés à un même compte à sa demande, par 24 heures
 
+// Rendez-vous pris en ligne (page publique : découverte ; espace personnel : accompagnement). Heure de Paris.
+$_RDV_PRISE_OUVERTE = 1;                   // 0 : aucun créneau n'est proposé, les pages renvoient à l'adresse de contact
+$_RDV_PRISE = array(                       // par type : durée et pas en minutes, délai avant le premier créneau, horizon, rendez-vous à venir admis
+    'decouverte' => array('duree' => 30, 'canaux' => array('visio', 'telephone'), 'pas' => 30, 'delai_heures' => 24, 'horizon_jours' => 30, 'max_a_venir' => 1),
+    'suivi' => array('duree' => 45, 'canaux' => array('visio', 'telephone'), 'pas' => 30, 'delai_heures' => 24, 'horizon_jours' => 30, 'max_a_venir' => 1),
+);
+$_RDV_PRISE_PLAFOND = 20;                  // réservations en ligne par 24 heures ; au-delà la prise se ferme jusqu'au lendemain et l'alerte part
+$_RDV_MODIFIABLE_HEURES = 12;              // le parent annule ou déplace en ligne jusqu'à ce délai avant le rendez-vous
+$_RDV_DEPLACEMENTS_MAX = 3;                // déplacements en ligne d'un même rendez-vous
+$_RDV_RAPPEL_HEURES = 24;                  // rappel par e-mail avant un rendez-vous confirmé
+$_RDV_RAPPEL_PRIS_AVANT_HEURES = 36;       // pas de rappel pour un rendez-vous pris moins de ce délai avant son heure
+$_LIMITE_RDV = array(8, 60);               // réservations et gestes depuis une adresse IP : array(nombre maximal, fenêtre en minutes)
+$_LIMITE_CRENEAUX = array(120, 15);        // lectures des créneaux depuis une adresse IP
+$_BILLET_MINUTES = 10;                     // durée d'un billet délivré par l'API des parents (rendez-vous de l'espace personnel)
+
 // E-mails aux parents
-$_MAIL_ESSAIS_MAX = 5;                     // au-delà, un envoi en erreur attend une relance manuelle
+$_MAIL_ESSAIS_MAX = 5;                    // au-delà, un envoi en erreur attend une relance manuelle
 
 // Médias de la formation
 $_MEDIA_MORCEAU_MAX = 4194304;             // octets par morceau téléversé (4 Mo : sous la limite PHP par défaut)

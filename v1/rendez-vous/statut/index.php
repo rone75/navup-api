@@ -8,6 +8,9 @@ include "../../../include/package.user.php";
 include "../../../include/package.saisie.php";
 include "../../../include/package.contact.php";
 include "../../../include/package.suivi.php";
+include "../../../include/package.message.php";
+include "../../../include/package.ics.php";
+include "../../../include/package.automate.php";
 include "../../../require/param.php";
 
 $H = new Header();
@@ -22,6 +25,7 @@ $Rdv = new Rdv();
 $Interaction = new Interaction();
 $Tache = new Tache();
 $Suivi = new Suivi();
+$Message = new Message();
 
 // Connexion Mysql
 $Mysql = new Mysql();
@@ -32,7 +36,8 @@ $file_err = getcwd() . "/index.php";
 date_default_timezone_set('Europe/Paris');
 
 // Statut d'un rendez-vous (CDC §11) ################################
-// PUT {id_rdv, statut, date?, heure?, duree?, motif_cloture?, compte_rendu?}
+// PUT {id_rdv, statut, date?, heure?, duree?, motif_cloture?, compte_rendu?, prevenir?}
+// prevenir (0|1) : la case des formulaires ; absente (« Confirmer » est un simple clic), le choix gardé par le rendez-vous vaut.
 // - a_confirmer, confirme : sur une demande, `date` et `heure` fixent le créneau (une fois pour toutes) ;
 // - effectue, absent : une fois le rendez-vous commencé ; `compte_rendu` avec « effectué », `motif_cloture` avec « absent » ;
 // - annule : `motif_cloture` facultatif. Un rendez-vous clôturé se rétablit (issue cochée par erreur).
@@ -58,6 +63,7 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
         $Response->forbidden("Le motif et le compte rendu sont des notes internes : vous n'avez pas le droit de les écrire.");
     }
     $champs['debut'] = $Rdv->lireCreneau($R);
+    $champs['prevenir'] = isset($R->prevenir) ? (int) $R->prevenir === 1 : null;
 
     $avertissements = $Rdv->changerStatut($rdv, $R->statut, $champs, (int) $user->id_users);
 

@@ -254,6 +254,8 @@ if ($_SERVER['REQUEST_METHOD'] === "PUT") {
         // fiche ; le parent peut aussi demander un lien depuis la page de connexion.
         if (in_array('email', $modifies, true)) {
             Compte::revoquer($id, $id_users, 'automatique');
+            // Les liens de gestion de ses rendez-vous sont partis à l'ancienne adresse : ils ne valent plus
+            (new Rdv())->revoquerLiens($id);
         }
         $SQL->commit();
     }

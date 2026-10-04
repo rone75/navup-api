@@ -26,6 +26,7 @@ if (php_sapi_name() !== 'cli') {
 
 include __DIR__ . "/../include/package.mysql.php";
 include __DIR__ . "/../include/package.compte.php";
+include __DIR__ . "/../include/package.message.php";
 include __DIR__ . "/../require/param.php";
 
 date_default_timezone_set('Europe/Paris');
@@ -53,13 +54,21 @@ if ($n > 0) {
     $ecarts[] = "$n e-mail(s) en attente depuis plus d'une heure";
 }
 $n = $nombre(
-    "SELECT COUNT(*) AS n FROM m_message m WHERE m.etat = 'envoye'
+    "SELECT COUNT(*) AS n FROM m_message m WHERE m.etat = 'envoye' AND m.modele NOT IN (" . Message::internes() . ")
        AND NOT EXISTS (SELECT 1 FROM d_evenement e WHERE e.id_contact = m.id_contact AND e.type = 'email' AND e.objet_type = 'message' AND e.objet_id = m.id_message)"
 );
 if ($n > 0) {
     $ecarts[] = "$n e-mail(s) envoyé(s) sans fait dans le fil du dossier";
 }
-$n = $nombre("SELECT COUNT(*) AS n FROM m_message WHERE corps LIKE '%paiement/?j=%' OR corps LIKE '%mot-de-passe#%'");
+// Un avis interne (au responsable d'un rendez-vous) n'est pas adressé au parent : il ne s'écrit pas dans le fil du dossier
+$n = $nombre(
+    "SELECT COUNT(*) AS n FROM m_message m WHERE m.modele IN (" . Message::internes() . ")
+       AND EXISTS (SELECT 1 FROM d_evenement e WHERE e.type = 'email' AND e.objet_type = 'message' AND e.objet_id = m.id_message)"
+);
+if ($n > 0) {
+    $ecarts[] = "$n avis interne(s) écrit(s) dans le fil d'un dossier";
+}
+$n = $nombre("SELECT COUNT(*) AS n FROM m_message WHERE corps LIKE '%paiement/?j=%' OR corps LIKE '%mot-de-passe#%' OR corps LIKE '%rendez-vous#%'");
 if ($n > 0) {
     $ecarts[] = "$n e-mail(s) conservé(s) avec un lien à jeton";
 }
