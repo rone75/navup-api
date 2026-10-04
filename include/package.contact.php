@@ -37,6 +37,44 @@ class Contact
 
     const SQL_FROM = " FROM d_contact c LEFT JOIN p_origine o ON o.code = c.code_origine";
 
+    // Jour d'arrivée d'un dossier : son premier contact, à défaut sa création. Même expression pour le filtre
+    // de période des listes et pour les « nouveaux dossiers » du tableau de bord.
+    const SQL_ARRIVEE = "COALESCE(c.date_premier_contact, DATE(c.date_creation))";
+
+    // Un fait (alias `e` sur d_evenement) et l'objet qu'il concerne, lu dans sa table : vente, écriture, rendez-vous,
+    // échange. Partagé par le fil d'un dossier et l'activité récente. Aucun texte interne ici : chronologie() les
+    // ajoute, avec le droit famille seulement.
+    const SQL_FAIT_COLONNES = "e.id_evenement, e.id_contact, e.type, e.module, e.objet_type, e.objet_id, e.details, e.origine, e.date_evenement, e.date_creation,
+        u.identifiant AS auteur_identifiant, u.prenom AS auteur_prenom, u.nom AS auteur_nom,
+        v.id_vente AS vente_id, v.montant AS vente_montant, vo.libelle AS vente_offre,
+        pa.id_vente AS paiement_id_vente, pa.type AS paiement_type, pa.montant AS paiement_montant, pa.date_paiement AS paiement_date,
+        pm.libelle AS paiement_moyen, pa.date_annulation AS paiement_date_annulation,
+        r.id_rdv AS rdv_id, r.type AS rdv_type, r.statut AS rdv_statut, r.date_debut AS rdv_date_debut, r.duree AS rdv_duree,
+        r.canal AS rdv_canal, rp.date_debut AS rdv_precedent_date,
+        i.id_interaction AS ech_id, i.canal AS ech_canal, i.sens AS ech_sens, i.resultat AS ech_resultat,
+        i.date_interaction AS ech_date, i.duree AS ech_duree, i.date_rappel AS ech_date_rappel, i.id_users AS ech_id_users";
+
+    const SQL_FAIT_JOINTURES = "
+        LEFT JOIN u_users u ON u.id_users = e.id_users
+        LEFT JOIN v_vente v ON e.objet_type = 'vente' AND v.id_vente = e.objet_id
+        LEFT JOIN p_offre vo ON vo.code = v.code_offre
+        LEFT JOIN v_paiement pa ON e.objet_type = 'paiement' AND pa.id_paiement = e.objet_id
+        LEFT JOIN p_moyen_paiement pm ON pm.code = pa.code_moyen
+        LEFT JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
+        LEFT JOIN r_rdv rp ON rp.id_rdv = r.id_rdv_precedent
+        LEFT JOIN i_interaction i ON e.objet_type = 'interaction' AND i.id_interaction = e.objet_id";
+
+    // Faits que retient l'activité récente du tableau de bord (CDC §3). Liste blanche : un type de fait ajouté plus
+    // tard n'y entre pas par accident. Écartés : les corrections, les statuts automatiques d'un rendez-vous (ils
+    // doublent le fait voisin), ce dont le libellé est une donnée familiale (déclaration, enfant, problématique),
+    // et les tâches (bruit).
+    const SQL_ACTIVITE = "(e.type IN ('creation', 'archivage', 'note')
+        OR (e.type = 'statut' AND NOT (e.origine = 'automatique' AND JSON_VALUE(e.details, '$.apres') IN ('rdv_demande', 'rdv_planifie')))
+        OR (e.type = 'vente' AND JSON_VALUE(e.details, '$.action') IN ('creation', 'annulation'))
+        OR (e.type = 'paiement' AND JSON_VALUE(e.details, '$.action') IN ('encaissement', 'remboursement', 'impaye', 'echec'))
+        OR (e.type = 'rdv' AND JSON_VALUE(e.details, '$.action') IN ('creation', 'planification', 'confirmation', 'effectue', 'absent', 'annulation', 'report'))
+        OR (e.type = 'echange' AND JSON_VALUE(e.details, '$.action') = 'creation'))";
+
     // IDENTITÉ ET DROITS #############################################
 
     public static function groupeDe($statut)
@@ -489,34 +527,18 @@ class Contact
         $total = (int) $Mysql->fetchOne("SELECT COUNT(*) AS nb FROM d_evenement e WHERE e.id_contact = ? AND e.module IN ($in)", $params)->nb;
 
         $rows = $Mysql->fetchAll(
-            "SELECT e.id_evenement, e.type, e.module, e.objet_type, e.objet_id, e.details, e.origine, e.date_evenement,
-                    u.identifiant AS auteur_identifiant, u.prenom AS auteur_prenom, u.nom AS auteur_nom,
+            "SELECT " . self::SQL_FAIT_COLONNES . ",
                     n.texte AS note_texte,
                     COALESCE(p.intitule, cat.libelle) AS problematique_libelle,
                     en.prenom AS enfant_prenom,
-                    v.id_vente AS vente_id, v.montant AS vente_montant, vo.libelle AS vente_offre,
-                    pa.id_vente AS paiement_id_vente, pa.type AS paiement_type, pa.montant AS paiement_montant, pa.date_paiement AS paiement_date,
-                    pm.libelle AS paiement_moyen, pa.date_annulation AS paiement_date_annulation,
-                    r.id_rdv AS rdv_id, r.type AS rdv_type, r.statut AS rdv_statut, r.date_debut AS rdv_date_debut, r.duree AS rdv_duree,
-                    r.canal AS rdv_canal, rp.date_debut AS rdv_precedent_date,
-                    i.id_interaction AS ech_id, i.canal AS ech_canal, i.sens AS ech_sens, i.resultat AS ech_resultat,
-                    i.date_interaction AS ech_date, i.duree AS ech_duree, i.date_rappel AS ech_date_rappel, i.id_users AS ech_id_users,
                     t.id_tache AS tache_id, t.titre AS tache_titre, t.alerte AS tache_alerte, t.nature AS tache_nature,
                     t.categorie AS tache_categorie, t.date_echeance AS tache_date_echeance,
                     $textes
-             FROM d_evenement e
-             LEFT JOIN u_users u ON u.id_users = e.id_users
+             FROM d_evenement e" . self::SQL_FAIT_JOINTURES . "
              LEFT JOIN d_note n ON e.objet_type = 'note' AND n.id_note = e.objet_id
              LEFT JOIN d_problematique p ON e.objet_type = 'problematique' AND p.id_problematique = e.objet_id
              LEFT JOIN p_categorie_problematique cat ON cat.code = p.code_categorie
              LEFT JOIN d_enfant en ON e.objet_type = 'enfant' AND en.id_enfant = e.objet_id
-             LEFT JOIN v_vente v ON e.objet_type = 'vente' AND v.id_vente = e.objet_id
-             LEFT JOIN p_offre vo ON vo.code = v.code_offre
-             LEFT JOIN v_paiement pa ON e.objet_type = 'paiement' AND pa.id_paiement = e.objet_id
-             LEFT JOIN p_moyen_paiement pm ON pm.code = pa.code_moyen
-             LEFT JOIN r_rdv r ON e.objet_type = 'rdv' AND r.id_rdv = e.objet_id
-             LEFT JOIN r_rdv rp ON rp.id_rdv = r.id_rdv_precedent
-             LEFT JOIN i_interaction i ON e.objet_type = 'interaction' AND i.id_interaction = e.objet_id
              LEFT JOIN t_tache t ON e.objet_type = 'tache' AND t.id_tache = e.objet_id
              WHERE e.id_contact = ? AND e.module IN ($in)
              ORDER BY e.date_evenement DESC, e.id_evenement DESC
@@ -526,102 +548,161 @@ class Contact
 
         $evenements = array();
         foreach ($rows as $e) {
-            $details = $e->details === null ? null : json_decode($e->details, true);
-            // Libellé de l'objet concerné, lu dans sa table (null s'il a été supprimé depuis)
-            $libelle = null;
-            if ($e->objet_type === 'note') {
-                $libelle = $e->note_texte;
-            } elseif ($e->objet_type === 'problematique') {
-                $libelle = $e->problematique_libelle;
-            } elseif ($e->objet_type === 'enfant') {
-                $libelle = $e->enfant_prenom;
-            }
-            // Vente ou écriture concernée : montants lus dans leur table, au moment de l'affichage
-            $objet = null;
-            if ($e->objet_type === 'vente' && $e->vente_id !== null) {
-                $objet = array(
-                    'id_vente' => (int) $e->vente_id,
-                    'reference' => 'VE-' . str_pad((string) (int) $e->vente_id, 5, '0', STR_PAD_LEFT),
-                    'offre' => $e->vente_offre,
-                    'montant' => (int) $e->vente_montant,
-                );
-            } elseif ($e->objet_type === 'paiement' && $e->paiement_type !== null) {
-                $objet = array(
-                    'id_vente' => (int) $e->paiement_id_vente,
-                    'type' => $e->paiement_type,
-                    'montant' => (int) $e->paiement_montant,
-                    'date_paiement' => $e->paiement_date,
-                    'moyen' => $e->paiement_moyen,
-                    'annulee' => $e->paiement_date_annulation !== null,
-                );
-            }
-            // Rendez-vous, échange ou tâche concerné (clé `suivi`), lu de même dans sa table
-            $suivi = null;
-            if ($e->objet_type === 'rdv' && $e->rdv_id !== null) {
-                $suivi = array(
-                    'id_rdv' => (int) $e->rdv_id,
-                    'type' => $e->rdv_type,
-                    'statut' => $e->rdv_statut,
-                    'date_debut' => $e->rdv_date_debut,
-                    'duree' => (int) $e->rdv_duree,
-                    'canal' => $e->rdv_canal,
-                    'date_precedente' => $e->rdv_precedent_date,
-                );
-                // Un seul texte par fait, celui qui l'explique : le motif à la prise de rendez-vous (pas à chaque créneau),
-                // la raison d'une annulation ou d'une absence, le compte rendu quand il est écrit (pas à chaque correction).
-                $action = $details['action'] ?? null;
-                if ($avecFamille) {
-                    if ($action === 'creation') {
-                        $suivi['texte'] = $e->rdv_motif;
-                    } elseif (in_array($action, array('annulation', 'absent'), true)) {
-                        $suivi['texte'] = $e->rdv_motif_cloture;
-                    } elseif (($action === 'effectue' && !empty($details['compte_rendu'])) || ($action === 'compte_rendu' && ($details['etat'] ?? null) === 'ajout')) {
-                        $suivi['texte'] = $e->rdv_compte_rendu;
-                    }
-                }
-            } elseif ($e->objet_type === 'interaction' && $e->ech_id !== null) {
-                $suivi = array(
-                    'id_interaction' => (int) $e->ech_id,
-                    'canal' => $e->ech_canal,
-                    'sens' => $e->ech_sens,
-                    'resultat' => $e->ech_resultat,
-                    'date_interaction' => $e->ech_date,
-                    'duree' => $e->ech_duree === null ? null : (int) $e->ech_duree,
-                    'date_rappel' => $e->ech_date_rappel,
-                    'id_users' => $e->ech_id_users === null ? null : (int) $e->ech_id_users,
-                );
-                if ($avecFamille && ($details['action'] ?? null) === 'creation') {
-                    $suivi['motif'] = $e->ech_motif;
-                    $suivi['texte'] = $e->ech_compte_rendu;
-                }
-            } elseif ($e->objet_type === 'tache' && $e->tache_id !== null) {
-                $suivi = array(
-                    'id_tache' => (int) $e->tache_id,
-                    'nature' => $e->tache_nature,
-                    'alerte' => $e->tache_alerte,
-                    'date_echeance' => $e->tache_date_echeance,
-                );
-                // L'intitulé d'une tâche de suivi est une note interne
-                if ($e->tache_categorie === 'gestion' || $avecFamille) {
-                    $suivi['titre'] = $e->tache_titre;
-                }
-            }
-            $evenements[] = array(
-                'id_evenement' => (int) $e->id_evenement,
-                'type' => $e->type,
-                'module' => $e->module,
-                'objet_type' => $e->objet_type,
-                'objet_id' => $e->objet_id === null ? null : (int) $e->objet_id,
-                'objet_libelle' => $libelle,
-                'objet' => $objet,
-                'suivi' => $suivi,
-                'details' => $details,
-                'origine' => $e->origine,
-                'auteur' => $this->auteur($e),
-                'date_evenement' => $e->date_evenement,
-            );
+            $evenements[] = $this->faitSortie($e, $avecFamille);
         }
 
         return array($total, $evenements);
+    }
+
+    /**
+     * Activité récente, tous dossiers confondus (tableau de bord, CDC §3) : les derniers faits enregistrés parmi ceux
+     * de SQL_ACTIVITE, limités aux modules et aux dossiers que l'utilisateur peut lire, avec l'identité du dossier.
+     * Méthode distincte de chronologie() : elle ne joint ni note, ni problématique, ni enfant, ni tâche, et ne lit
+     * aucun motif ni compte rendu ; une note s'y annonce sans son texte.
+     * Dans l'ordre d'enregistrement : un appel noté le lendemain arrive en tête, avec la date du fait.
+     */
+    public function activite($user, $limit = 15)
+    {
+        global $Mysql;
+
+        $lisibles = $this->conditionLisibles($user);
+        if ($lisibles === null) {
+            return array();
+        }
+        $modules = $this->modulesLisibles($user);
+        $in = implode(', ', array_fill(0, count($modules), '?'));
+
+        // STRAIGHT_JOIN : la lecture part des faits les plus récents (clé primaire à rebours) et s'arrête à $limit lignes
+        $rows = $Mysql->fetchAll(
+            "SELECT " . self::SQL_FAIT_COLONNES . ",
+                    c.prenom, c.nom, c.statut AS contact_statut, c.date_archivage AS contact_date_archivage
+             FROM d_evenement e
+             STRAIGHT_JOIN d_contact c ON c.id_contact = e.id_contact" . self::SQL_FAIT_JOINTURES . "
+             WHERE " . $lisibles[0] . " AND e.module IN ($in) AND " . self::SQL_ACTIVITE . "
+             ORDER BY e.id_evenement DESC
+             LIMIT ?",
+            array_merge($lisibles[1], $modules, array((int) $limit))
+        );
+
+        $faits = array();
+        foreach ($rows as $e) {
+            $fait = $this->faitSortie($e, false);
+            $fait['date_creation'] = $e->date_creation;
+            $fait['contact'] = array(
+                'id_contact' => (int) $e->id_contact,
+                'reference' => self::reference($e->id_contact),
+                'prenom' => $e->prenom,
+                'nom' => $e->nom,
+                'groupe' => self::groupeDe($e->contact_statut),
+                'archive' => $e->contact_date_archivage !== null,
+            );
+            $faits[] = $fait;
+        }
+
+        return $faits;
+    }
+
+    /**
+     * Fait tel que servi au front, avec l'objet qu'il concerne (ligne lue avec SQL_FAIT_COLONNES). Les colonnes de
+     * libellés familiaux, de tâche et de textes internes n'existent que dans la requête de chronologie() : absentes,
+     * elles valent null. $avecFamille : droit sur les données familiales.
+     */
+    private function faitSortie($e, $avecFamille)
+    {
+        $details = $e->details === null ? null : json_decode($e->details, true);
+        // Libellé de l'objet concerné, lu dans sa table (null s'il a été supprimé depuis)
+        $libelle = null;
+        if ($e->objet_type === 'note') {
+            $libelle = $e->note_texte ?? null;
+        } elseif ($e->objet_type === 'problematique') {
+            $libelle = $e->problematique_libelle ?? null;
+        } elseif ($e->objet_type === 'enfant') {
+            $libelle = $e->enfant_prenom ?? null;
+        }
+        // Vente ou écriture concernée : montants lus dans leur table, au moment de l'affichage
+        $objet = null;
+        if ($e->objet_type === 'vente' && $e->vente_id !== null) {
+            $objet = array(
+                'id_vente' => (int) $e->vente_id,
+                'reference' => 'VE-' . str_pad((string) (int) $e->vente_id, 5, '0', STR_PAD_LEFT),
+                'offre' => $e->vente_offre,
+                'montant' => (int) $e->vente_montant,
+            );
+        } elseif ($e->objet_type === 'paiement' && $e->paiement_type !== null) {
+            $objet = array(
+                'id_vente' => (int) $e->paiement_id_vente,
+                'type' => $e->paiement_type,
+                'montant' => (int) $e->paiement_montant,
+                'date_paiement' => $e->paiement_date,
+                'moyen' => $e->paiement_moyen,
+                'annulee' => $e->paiement_date_annulation !== null,
+            );
+        }
+        // Rendez-vous, échange ou tâche concerné (clé `suivi`), lu de même dans sa table
+        $suivi = null;
+        if ($e->objet_type === 'rdv' && $e->rdv_id !== null) {
+            $suivi = array(
+                'id_rdv' => (int) $e->rdv_id,
+                'type' => $e->rdv_type,
+                'statut' => $e->rdv_statut,
+                'date_debut' => $e->rdv_date_debut,
+                'duree' => (int) $e->rdv_duree,
+                'canal' => $e->rdv_canal,
+                'date_precedente' => $e->rdv_precedent_date,
+            );
+            // Un seul texte par fait, celui qui l'explique : le motif à la prise de rendez-vous (pas à chaque créneau),
+            // la raison d'une annulation ou d'une absence, le compte rendu quand il est écrit (pas à chaque correction).
+            $action = $details['action'] ?? null;
+            if ($avecFamille) {
+                if ($action === 'creation') {
+                    $suivi['texte'] = $e->rdv_motif ?? null;
+                } elseif (in_array($action, array('annulation', 'absent'), true)) {
+                    $suivi['texte'] = $e->rdv_motif_cloture ?? null;
+                } elseif (($action === 'effectue' && !empty($details['compte_rendu'])) || ($action === 'compte_rendu' && ($details['etat'] ?? null) === 'ajout')) {
+                    $suivi['texte'] = $e->rdv_compte_rendu ?? null;
+                }
+            }
+        } elseif ($e->objet_type === 'interaction' && $e->ech_id !== null) {
+            $suivi = array(
+                'id_interaction' => (int) $e->ech_id,
+                'canal' => $e->ech_canal,
+                'sens' => $e->ech_sens,
+                'resultat' => $e->ech_resultat,
+                'date_interaction' => $e->ech_date,
+                'duree' => $e->ech_duree === null ? null : (int) $e->ech_duree,
+                'date_rappel' => $e->ech_date_rappel,
+                'id_users' => $e->ech_id_users === null ? null : (int) $e->ech_id_users,
+            );
+            if ($avecFamille && ($details['action'] ?? null) === 'creation') {
+                $suivi['motif'] = $e->ech_motif ?? null;
+                $suivi['texte'] = $e->ech_compte_rendu ?? null;
+            }
+        } elseif ($e->objet_type === 'tache' && isset($e->tache_id)) {
+            $suivi = array(
+                'id_tache' => (int) $e->tache_id,
+                'nature' => $e->tache_nature,
+                'alerte' => $e->tache_alerte,
+                'date_echeance' => $e->tache_date_echeance,
+            );
+            // L'intitulé d'une tâche de suivi est une note interne
+            if ($e->tache_categorie === 'gestion' || $avecFamille) {
+                $suivi['titre'] = $e->tache_titre;
+            }
+        }
+
+        return array(
+            'id_evenement' => (int) $e->id_evenement,
+            'type' => $e->type,
+            'module' => $e->module,
+            'objet_type' => $e->objet_type,
+            'objet_id' => $e->objet_id === null ? null : (int) $e->objet_id,
+            'objet_libelle' => $libelle,
+            'objet' => $objet,
+            'suivi' => $suivi,
+            'details' => $details,
+            'origine' => $e->origine,
+            'auteur' => $this->auteur($e),
+            'date_evenement' => $e->date_evenement,
+        );
     }
 }

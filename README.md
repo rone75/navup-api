@@ -198,6 +198,41 @@ Règles tenues par l'API :
 
 `php script-cgi/verifier-suivi.php` (lecture seule, utilisable en production) contrôle le dernier échange de chaque dossier, les tâches automatiques (à lancer après une synchronisation) et les chaînes de rendez-vous ; code 1 au premier écart.
 
+## Endpoint de l'étape 5 : tableau de bord
+
+| Méthode et chemin | Rôle | Accès |
+|---|---|---|
+| `GET v1/tableau-de-bord/` `?periode=jour\|7j\|mois\|trimestre\|annee\|perso&du=&au=` | les chiffres de l'accueil et l'activité récente | tout utilisateur connecté ; un bloc par droit |
+
+Réponse : `aujourdhui`, `periode {code, du, au}`, puis
+
+- à ce jour : `dossiers` (par groupe lisible : `statuts`, `total` hors classés, `classes`) et `a_encaisser {nb, montant, en_retard, nb_retard}` ;
+- sur la période : `nouveaux {prospects, clients, classes {prospects, clients}, total}`, `conversion {cohorte, rdv, vente, actifs}` (chaque étape : `nb`, `taux`), `ventes {nb, vendu, comptant, fractionne, defaites}`, `ecritures {nb, encaisse, rembourse, frais, net, nb_encaissements, nb_remboursements, nb_impayes}` ;
+- `activite` : les quinze derniers faits enregistrés, chacun avec son `contact` (identité seulement).
+
+Les tâches à faire et les rendez-vous à venir ne sont pas repris : `v1/taches/` (ses `compteurs`) et `v1/rendez-vous/` les servent déjà.
+
+Règles tenues par l'API :
+
+- **Périodes** : civiles, à ce jour. `mois` (défaut) va du 1er du mois à aujourd'hui, `trimestre` du premier jour du trimestre civil, `annee` du 1er janvier ; `7j` compte aujourd'hui. `perso` exige `du` et `au`, valides et dans l'ordre (400 sinon, comme pour un code inconnu). Le jour vient de PHP.
+- **Un chiffre = le total d'une liste** (CDC §27). Les montants sortent de `Vente::totauxVentes()`, `totauxJournal()` et `totauxEcheances()`, que les listes appellent aussi : seul le `WHERE` change, et celui du tableau de bord est celui de la liste ouverte par le chiffre. Les dossiers se comptent avec les conditions de `v1/contacts/` (`Contact::SQL_ARRIVEE` pour la période).
+
+  | Chiffre | Liste qui le reproduit |
+  |---|---|
+  | `ventes.nb`, `ventes.vendu` | `v1/ventes/?du=&au=` (`total`, `totaux.vendu`) |
+  | `ventes.comptant`, `ventes.fractionne` | `v1/ventes/?du=&au=&modalite=` |
+  | `ventes.defaites.nb` | `v1/ventes/?du=&au=&statut=rembourse_partiellement,rembourse,annule` |
+  | `ecritures` | `v1/paiements/?du=&au=` (`total`, `totaux`) ; `nb_encaissements`, `nb_remboursements`, `nb_impayes` : le `total` de la même liste avec `type=` |
+  | `a_encaisser` | `v1/paiements/echeances/?etat=a_encaisser` ; la part en retard : `?etat=retard` |
+  | `dossiers.<groupe>.statuts.<statut>`, `.total`, `.classes` | `v1/contacts/?groupe=&statut=` ; `?groupe=` ; `?groupe=&archive=1` |
+  | `nouveaux.<groupe>`, `nouveaux.classes.<groupe>` | `v1/contacts/?groupe=&du=&au=` ; avec `archive=1` |
+
+- **Vendu** : les ventes datées de la période, telles que la liste « Toutes » les compte (une vente annulée y reste, pour ce qu'elle a encaissé). **Encaissé, remboursé** : les écritures datées de la période, hors écritures annulées ; un impayé se retranche. **Reste à encaisser** : tout ce qui est dû à ce jour, hors période. Sur toute la durée, vendu = encaissé + reste à encaisser.
+- **Nouveaux dossiers** : premier contact (à défaut, création) dans la période. Trois nombres et non un seul, parce que les classés sans suite ont leur propre liste.
+- **Conversion par cohorte** : parmi les nouveaux dossiers de la période, classés compris, combien ont à ce jour un rendez-vous pris (un créneau a été fixé, quel que soit son sort), une vente non annulée, le statut client actif ou programme terminé. Les étapes ne sont pas emboîtées. `taux` (pourcentage entier) vaut `null` sous dix dossiers (`Pilotage::SEUIL_TAUX`).
+- **Activité récente** (`Contact::activite()`) : dans l'ordre d'enregistrement (un appel noté le lendemain arrive en tête, avec `date_evenement` au jour du fait et `date_creation` au jour de la saisie). Liste blanche `Contact::SQL_ACTIVITE` : création et classement d'un dossier, note, changement de statut, vente créée ou annulée, écriture, rendez-vous, échange. N'y entrent pas : les corrections, le statut automatique d'un rendez-vous (il double le fait voisin), les tâches, et ce dont le libellé est une donnée familiale (déclaration, enfant, problématique). Aucun texte n'est lu : une note s'annonce sans son contenu, un rendez-vous sans son motif.
+- **Droits** : chaque bloc exige son droit (`ventes`, `paiements`, les groupes de dossiers ; `rendez_vous`, `ventes`, `clients` pour les étapes de la conversion) et manque à la réponse sans lui. L'activité se limite aux modules et aux dossiers lisibles : le profil `gestion` n'y voit ni note ni échange.
+
 ## Profils et droits
 
 Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion.

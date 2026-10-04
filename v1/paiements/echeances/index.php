@@ -81,9 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $params = array_merge($params, $cond[1]);
     }
 
-    $sqlFrom = " FROM v_echeance e
-        INNER JOIN v_vente v ON v.id_vente = e.id_vente
-        INNER JOIN d_contact c ON c.id_contact = v.id_contact";
+    $sqlFrom = Vente::SQL_FROM_ECHEANCES;
     $sqlWhere = " WHERE " . implode(" AND ", $where);
     $tri = $S->tri(
         array('date' => 'e.date_prevue', 'montant' => 'e.montant', 'nom' => 'c.nom'),
@@ -92,14 +90,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     );
     list($page, $limit, $offset) = $S->pagination();
 
-    $t = $Mysql->fetchOne(
-        "SELECT COUNT(*) AS nb,
-                COALESCE(SUM(e.montant - e.montant_paye), 0) AS a_encaisser,
-                COALESCE(SUM(CASE WHEN e.montant_paye < e.montant AND e.date_prevue < ? THEN e.montant - e.montant_paye ELSE 0 END), 0) AS en_retard,
-                COALESCE(SUM(CASE WHEN e.montant_paye < e.montant AND e.date_prevue < ? THEN 1 ELSE 0 END), 0) AS nb_retard"
-        . $sqlFrom . $sqlWhere,
-        array_merge(array($aujourdhui, $aujourdhui), $params)
-    );
+    $t = $Vente->totauxEcheances(implode(" AND ", $where), $params, $aujourdhui);
     $rows = $Mysql->fetchAll(
         "SELECT e.*, c.id_contact, c.prenom, c.nom, c.statut AS contact_statut,
                 (SELECT COUNT(*) FROM v_echeance n WHERE n.id_vente = e.id_vente AND n.date_annulation IS NULL) AS nb_echeances"
@@ -124,13 +115,13 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
     $Response->success(array(
         'echeances' => $echeances,
-        'total' => (int) $t->nb,
+        'total' => $t['nb'],
         'page' => $page,
         'limit' => $limit,
         'totaux' => array(
-            'a_encaisser' => (int) $t->a_encaisser,
-            'en_retard' => (int) $t->en_retard,
-            'nb_retard' => (int) $t->nb_retard,
+            'a_encaisser' => $t['a_encaisser'],
+            'en_retard' => $t['en_retard'],
+            'nb_retard' => $t['nb_retard'],
         ),
     ));
 }

@@ -51,6 +51,17 @@ class Vente
         LEFT JOIN p_moyen_paiement m ON m.code = v.code_moyen
         " . self::SQL_SOMMES;
 
+    // Journal des écritures et échéances : mêmes jointures pour les lignes d'une liste et pour ses totaux
+    const SQL_FROM_JOURNAL = " FROM v_paiement p
+        INNER JOIN v_vente v ON v.id_vente = p.id_vente
+        INNER JOIN d_contact c ON c.id_contact = v.id_contact
+        LEFT JOIN p_moyen_paiement m ON m.code = p.code_moyen
+        LEFT JOIN u_users u ON u.id_users = p.id_users";
+
+    const SQL_FROM_ECHEANCES = " FROM v_echeance e
+        INNER JOIN v_vente v ON v.id_vente = e.id_vente
+        INNER JOIN d_contact c ON c.id_contact = v.id_contact";
+
     // Colonnes servies : la vente, ses sommes, et du dossier l'identité seulement (aucune donnée familiale).
     const COLONNES = "v.id_vente, v.id_contact, v.code_offre, o.libelle AS offre, v.date_vente, v.montant_catalogue, v.remise, v.motif_remise,
         v.montant, v.modalite, v.code_moyen, m.libelle AS moyen, v.statut, v.commentaire, v.date_annulation, v.motif_annulation, v.source,
@@ -360,6 +371,93 @@ class Vente
         global $S;
 
         return $S->dateFiltre($cle);
+    }
+
+    // TOTAUX D'UNE SÉLECTION #########################################
+    // Les totaux d'une liste et le chiffre du tableau de bord qui y renvoie sortent de la même requête :
+    // seul le WHERE change. C'est ce qui garantit qu'ils sont égaux (CDC §27).
+    // $where : conditions jointes par AND, sans le mot WHERE (chaîne vide : toute la table).
+
+    /** Totaux d'une sélection de ventes (alias `v`, `c`, `s` de SQL_FROM) : nombre, vendu, encaissé, remboursé, reste dû. */
+    public function totauxVentes($where, $params = array())
+    {
+        global $Mysql;
+
+        $t = $Mysql->fetchOne(
+            "SELECT COUNT(*) AS nb,
+                    COALESCE(SUM(" . self::SQL_VENDU . "), 0) AS vendu,
+                    COALESCE(SUM(COALESCE(s.encaisse, 0)), 0) AS encaisse,
+                    COALESCE(SUM(COALESCE(s.rembourse, 0)), 0) AS rembourse,
+                    COALESCE(SUM(" . self::SQL_RESTE . "), 0) AS reste_du"
+            . self::SQL_FROM . ($where !== '' ? " WHERE $where" : ''),
+            $params
+        );
+
+        return array(
+            'nb' => (int) $t->nb,
+            'vendu' => (int) $t->vendu,
+            'encaisse' => (int) $t->encaisse,
+            'rembourse' => (int) $t->rembourse,
+            'reste_du' => (int) $t->reste_du,
+        );
+    }
+
+    /**
+     * Totaux d'une sélection d'écritures (alias `p`, `v`, `c` de SQL_FROM_JOURNAL) : nombre, encaissé (encaissements
+     * moins impayés), remboursé, frais connus, net (encaissé moins frais), et le nombre d'encaissements, de remboursements
+     * et d'impayés qui font ces sommes. Une écriture annulée ne compte dans aucune somme ni dans ces trois nombres.
+     */
+    public function totauxJournal($where, $params = array())
+    {
+        global $Mysql;
+
+        $t = $Mysql->fetchOne(
+            "SELECT COUNT(*) AS nb,
+                    COALESCE(SUM(p.date_annulation IS NULL AND p.type = 'encaissement'), 0) AS nb_encaissements,
+                    COALESCE(SUM(p.date_annulation IS NULL AND p.type = 'remboursement'), 0) AS nb_remboursements,
+                    COALESCE(SUM(p.date_annulation IS NULL AND p.type = 'impaye'), 0) AS nb_impayes,
+                    COALESCE(SUM(CASE WHEN p.date_annulation IS NOT NULL THEN 0 WHEN p.type = 'encaissement' THEN p.montant WHEN p.type = 'impaye' THEN -p.montant ELSE 0 END), 0) AS encaisse,
+                    COALESCE(SUM(CASE WHEN p.date_annulation IS NULL AND p.type = 'remboursement' THEN p.montant ELSE 0 END), 0) AS rembourse,
+                    COALESCE(SUM(CASE WHEN p.date_annulation IS NULL AND p.type IN ('encaissement', 'remboursement') THEN COALESCE(p.frais, 0) ELSE 0 END), 0) AS frais"
+            . self::SQL_FROM_JOURNAL . ($where !== '' ? " WHERE $where" : ''),
+            $params
+        );
+
+        return array(
+            'nb' => (int) $t->nb,
+            'encaisse' => (int) $t->encaisse,
+            'rembourse' => (int) $t->rembourse,
+            'frais' => (int) $t->frais,
+            'net' => (int) $t->encaisse - (int) $t->frais,
+            'nb_encaissements' => (int) $t->nb_encaissements,
+            'nb_remboursements' => (int) $t->nb_remboursements,
+            'nb_impayes' => (int) $t->nb_impayes,
+        );
+    }
+
+    /**
+     * Totaux d'une sélection d'échéances (alias `e`, `v`, `c` de SQL_FROM_ECHEANCES) : nombre, reste à encaisser,
+     * dont la part et le nombre d'échéances en retard au jour $jour (AAAA-MM-JJ, donné par PHP).
+     */
+    public function totauxEcheances($where, $params, $jour)
+    {
+        global $Mysql;
+
+        $t = $Mysql->fetchOne(
+            "SELECT COUNT(*) AS nb,
+                    COALESCE(SUM(e.montant - e.montant_paye), 0) AS a_encaisser,
+                    COALESCE(SUM(CASE WHEN e.montant_paye < e.montant AND e.date_prevue < ? THEN e.montant - e.montant_paye ELSE 0 END), 0) AS en_retard,
+                    COALESCE(SUM(CASE WHEN e.montant_paye < e.montant AND e.date_prevue < ? THEN 1 ELSE 0 END), 0) AS nb_retard"
+            . self::SQL_FROM_ECHEANCES . ($where !== '' ? " WHERE $where" : ''),
+            array_merge(array($jour, $jour), $params)
+        );
+
+        return array(
+            'nb' => (int) $t->nb,
+            'a_encaisser' => (int) $t->a_encaisser,
+            'en_retard' => (int) $t->en_retard,
+            'nb_retard' => (int) $t->nb_retard,
+        );
     }
 
     // SAISIE #########################################################

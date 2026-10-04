@@ -142,15 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     );
     list($page, $limit, $offset) = $S->pagination();
 
-    $t = $Mysql->fetchOne(
-        "SELECT COUNT(*) AS nb,
-                COALESCE(SUM(" . Vente::SQL_VENDU . "), 0) AS vendu,
-                COALESCE(SUM(COALESCE(s.encaisse, 0)), 0) AS encaisse,
-                COALESCE(SUM(COALESCE(s.rembourse, 0)), 0) AS rembourse,
-                COALESCE(SUM(" . Vente::SQL_RESTE . "), 0) AS reste_du"
-        . Vente::SQL_FROM . $sqlWhere,
-        $params
-    );
+    $t = $Vente->totauxVentes(implode(" AND ", $where), $params);
     $rows = $Mysql->fetchAll(
         "SELECT " . Vente::COLONNES . Vente::SQL_FROM . $sqlWhere . " ORDER BY $tri LIMIT ? OFFSET ?",
         array_merge($params, array($limit, $offset))
@@ -163,14 +155,14 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
     $Response->success(array(
         'ventes' => $ventes,
-        'total' => (int) $t->nb,
+        'total' => $t['nb'],
         'page' => $page,
         'limit' => $limit,
         'totaux' => array(
-            'vendu' => (int) $t->vendu,
-            'encaisse' => (int) $t->encaisse,
-            'rembourse' => (int) $t->rembourse,
-            'reste_du' => (int) $t->reste_du,
+            'vendu' => $t['vendu'],
+            'encaisse' => $t['encaisse'],
+            'rembourse' => $t['rembourse'],
+            'reste_du' => $t['reste_du'],
         ),
     ));
 }

@@ -99,7 +99,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
             if ($d === false || $d->format('Y-m-d') !== $_GET[$cle]) {
                 $Response->validationError("Date invalide (format AAAA-MM-JJ) : $cle");
             }
-            $where[] = "COALESCE(c.date_premier_contact, DATE(c.date_creation)) $op ?";
+            $where[] = Contact::SQL_ARRIVEE . " $op ?";
             $params[] = $_GET[$cle];
         }
     }

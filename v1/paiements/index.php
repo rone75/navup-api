@@ -93,11 +93,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
         $params = array_merge($params, $cond[1]);
     }
 
-    $sqlFrom = " FROM v_paiement p
-        INNER JOIN v_vente v ON v.id_vente = p.id_vente
-        INNER JOIN d_contact c ON c.id_contact = v.id_contact
-        LEFT JOIN p_moyen_paiement m ON m.code = p.code_moyen
-        LEFT JOIN u_users u ON u.id_users = p.id_users";
+    $sqlFrom = Vente::SQL_FROM_JOURNAL;
     $sqlWhere = " WHERE " . implode(" AND ", $where);
     $tri = $S->tri(
         array('date' => 'p.date_paiement', 'montant' => 'p.montant', 'nom' => 'c.nom'),
@@ -106,14 +102,7 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
     );
     list($page, $limit, $offset) = $S->pagination();
 
-    $t = $Mysql->fetchOne(
-        "SELECT COUNT(*) AS nb,
-                COALESCE(SUM(CASE WHEN p.date_annulation IS NOT NULL THEN 0 WHEN p.type = 'encaissement' THEN p.montant WHEN p.type = 'impaye' THEN -p.montant ELSE 0 END), 0) AS encaisse,
-                COALESCE(SUM(CASE WHEN p.date_annulation IS NULL AND p.type = 'remboursement' THEN p.montant ELSE 0 END), 0) AS rembourse,
-                COALESCE(SUM(CASE WHEN p.date_annulation IS NULL AND p.type IN ('encaissement', 'remboursement') THEN COALESCE(p.frais, 0) ELSE 0 END), 0) AS frais"
-        . $sqlFrom . $sqlWhere,
-        $params
-    );
+    $t = $Vente->totauxJournal(implode(" AND ", $where), $params);
     $rows = $Mysql->fetchAll(
         "SELECT p.*, m.libelle AS moyen, c.id_contact, c.prenom, c.nom, c.statut AS contact_statut,
                 u.identifiant AS auteur_identifiant, u.prenom AS auteur_prenom, u.nom AS auteur_nom,
@@ -138,14 +127,14 @@ if ($_SERVER['REQUEST_METHOD'] === "GET") {
 
     $Response->success(array(
         'paiements' => $paiements,
-        'total' => (int) $t->nb,
+        'total' => $t['nb'],
         'page' => $page,
         'limit' => $limit,
         'totaux' => array(
-            'encaisse' => (int) $t->encaisse,
-            'rembourse' => (int) $t->rembourse,
-            'frais' => (int) $t->frais,
-            'net' => (int) $t->encaisse - (int) $t->frais,
+            'encaisse' => $t['encaisse'],
+            'rembourse' => $t['rembourse'],
+            'frais' => $t['frais'],
+            'net' => $t['net'],
         ),
     ));
 }
