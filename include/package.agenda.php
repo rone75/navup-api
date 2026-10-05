@@ -501,7 +501,7 @@ class Agenda
              FROM e_billet b
              INNER JOIN e_session s ON s.id_session = b.id_session AND s.id_compte = b.id_compte
              INNER JOIN a_compte c ON c.id_compte = b.id_compte
-             WHERE b.jeton = ? AND b.date_creation > NOW() - INTERVAL ? MINUTE
+             WHERE b.jeton = ? AND b.objet = 'rdv' AND b.date_creation > NOW() - INTERVAL ? MINUTE
                AND s.date_expiration > NOW()
                AND c.etat = 'actif' AND (c.date_revocation IS NULL OR s.date_creation > c.date_revocation)",
             array(hash('sha256', $brut), (int) $_BILLET_MINUTES),

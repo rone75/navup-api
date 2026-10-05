@@ -48,19 +48,24 @@ class Reglage
         $c['PROGRAMME_INACTIF_JOURS'] = array('groupe' => 'delais', 'libelle' => 'Prendre des nouvelles', 'aide' => 'jours sans sujet terminé, en cours de programme', 'type' => 'entier', 'min' => 7, 'max' => 60, 'unite' => 'jours');
         $c['ACCES_APRES_FIN_JOURS'] = array('groupe' => 'programme', 'libelle' => "Accès après la fin du programme", 'aide' => "jours pendant lesquels les contenus restent consultables (pour les comptes ouverts ensuite)", 'type' => 'entier', 'min' => 0, 'max' => 365, 'unite' => 'jours');
 
-        $c['RDV_PRISE_OUVERTE'] = array('groupe' => 'rdv', 'libelle' => 'Prise de rendez-vous en ligne', 'type' => 'booleen');
-        foreach (array('decouverte' => 'découverte (page publique)', 'suivi' => "d'accompagnement (espace des parents)") as $type => $nom) {
-            $c["RDV_PRISE.$type.duree"] = array('groupe' => 'rdv', 'libelle' => "Durée du rendez-vous $nom", 'type' => 'entier', 'min' => 15, 'max' => 120, 'unite' => 'minutes');
-            $c["RDV_PRISE.$type.canaux"] = array('groupe' => 'rdv', 'libelle' => "Façons d'échanger proposées, rendez-vous $nom", 'type' => 'canaux');
-            $c["RDV_PRISE.$type.pas"] = array('groupe' => 'rdv', 'libelle' => "Écart entre deux créneaux, rendez-vous $nom", 'type' => 'entier', 'min' => 10, 'max' => 120, 'unite' => 'minutes');
-            $c["RDV_PRISE.$type.delai_heures"] = array('groupe' => 'rdv', 'libelle' => "Délai avant le premier créneau, rendez-vous $nom", 'type' => 'entier', 'min' => 0, 'max' => 168, 'unite' => 'heures');
-            $c["RDV_PRISE.$type.horizon_jours"] = array('groupe' => 'rdv', 'libelle' => "Créneaux proposés jusqu'à, rendez-vous $nom", 'type' => 'entier', 'min' => 1, 'max' => 90, 'unite' => 'jours');
-            $c["RDV_PRISE.$type.max_a_venir"] = array('groupe' => 'rdv', 'libelle' => "Rendez-vous $nom à venir admis par dossier", 'type' => 'entier', 'min' => 1, 'max' => 5, 'unite' => '');
+        $c['RGPD_PROSPECT_ANS'] = array('groupe' => 'conservation', 'libelle' => 'Prospect sans vente : tout effacer', 'aide' => 'ans après le dernier fait du dossier', 'type' => 'entier', 'min' => 1, 'max' => 10, 'unite' => 'ans');
+        $c['RGPD_CLIENT_ANS'] = array('groupe' => 'conservation', 'libelle' => 'Client : effacer les données familiales', 'aide' => "ans après la fin de l'accès à l'espace (ou la dernière vente)", 'type' => 'entier', 'min' => 1, 'max' => 10, 'unite' => 'ans');
+        $c['RGPD_COMPTABLE_ANS'] = array('groupe' => 'conservation', 'libelle' => "Client : effacer l'identité", 'aide' => 'ans après la dernière écriture comptable (obligation légale : 10 ans)', 'type' => 'entier', 'min' => 10, 'max' => 15, 'unite' => 'ans');
+        $c['RGPD_JOURNAL_MOIS'] = array('groupe' => 'conservation', 'libelle' => "Journal d'audit et e-mails envoyés", 'aide' => 'mois de conservation, puis effacement automatique', 'type' => 'entier', 'min' => 6, 'max' => 36, 'unite' => 'mois');
+
+        $c['RDV_PRISE_OUVERTE'] = array('groupe' => 'rdv', 'libelle' => 'Prise de rendez-vous en ligne ouverte', 'type' => 'booleen');
+        foreach (array('decouverte' => 'Rendez-vous découverte, sur la page publique', 'suivi' => "Rendez-vous d'accompagnement, dans l'espace des parents") as $type => $sous) {
+            $c["RDV_PRISE.$type.duree"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => 'Durée', 'type' => 'entier', 'min' => 15, 'max' => 120, 'unite' => 'minutes');
+            $c["RDV_PRISE.$type.canaux"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => "Façons d'échanger proposées", 'type' => 'canaux');
+            $c["RDV_PRISE.$type.pas"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => 'Écart entre deux créneaux', 'type' => 'entier', 'min' => 10, 'max' => 120, 'unite' => 'minutes');
+            $c["RDV_PRISE.$type.delai_heures"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => 'Premier créneau au plus tôt', 'type' => 'entier', 'min' => 0, 'max' => 168, 'unite' => 'heures après la demande');
+            $c["RDV_PRISE.$type.horizon_jours"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => 'Créneaux proposés sur', 'type' => 'entier', 'min' => 1, 'max' => 90, 'unite' => 'jours');
+            $c["RDV_PRISE.$type.max_a_venir"] = array('groupe' => 'rdv', 'sous' => $sous, 'libelle' => 'Rendez-vous à venir admis par dossier', 'type' => 'entier', 'min' => 1, 'max' => 5, 'unite' => '');
         }
-        $c['RDV_PRISE_PLAFOND'] = array('groupe' => 'rdv', 'libelle' => 'Réservations publiques admises en 24 heures', 'type' => 'entier', 'min' => 1, 'max' => 500, 'unite' => '');
-        $c['RDV_MODIFIABLE_HEURES'] = array('groupe' => 'rdv', 'libelle' => 'Annuler ou déplacer en ligne jusqu’à', 'type' => 'entier', 'min' => 0, 'max' => 72, 'unite' => 'heures avant');
-        $c['RDV_DEPLACEMENTS_MAX'] = array('groupe' => 'rdv', 'libelle' => 'Déplacements en ligne d’un même rendez-vous', 'type' => 'entier', 'min' => 0, 'max' => 10, 'unite' => '');
-        $c['RDV_RAPPEL_HEURES'] = array('groupe' => 'rdv', 'libelle' => 'Rappel par e-mail', 'type' => 'entier', 'min' => 1, 'max' => 72, 'unite' => 'heures avant');
+        $c['RDV_PRISE_PLAFOND'] = array('groupe' => 'rdv', 'sous' => 'Pour tous les rendez-vous pris en ligne', 'libelle' => 'Réservations publiques admises en 24 heures', 'type' => 'entier', 'min' => 1, 'max' => 500, 'unite' => '');
+        $c['RDV_MODIFIABLE_HEURES'] = array('groupe' => 'rdv', 'sous' => 'Pour tous les rendez-vous pris en ligne', 'libelle' => 'Annuler ou déplacer en ligne jusqu’à', 'type' => 'entier', 'min' => 0, 'max' => 72, 'unite' => 'heures avant');
+        $c['RDV_DEPLACEMENTS_MAX'] = array('groupe' => 'rdv', 'sous' => 'Pour tous les rendez-vous pris en ligne', 'libelle' => 'Déplacements en ligne d’un même rendez-vous', 'type' => 'entier', 'min' => 0, 'max' => 10, 'unite' => '');
+        $c['RDV_RAPPEL_HEURES'] = array('groupe' => 'rdv', 'sous' => 'Pour tous les rendez-vous pris en ligne', 'libelle' => 'Rappel par e-mail', 'type' => 'entier', 'min' => 1, 'max' => 72, 'unite' => 'heures avant');
 
         return $c;
     }

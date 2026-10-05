@@ -52,3 +52,13 @@ $_FFPROBE = "/usr/bin/ffprobe";
 // (vide : pas de rendu, la fiche ne s'y ouvre qu'en PDF)
 $_PDFTOPPM = "/usr/bin/pdftoppm";
 $_PDFINFO = "/usr/bin/pdfinfo";
+
+// Double authentification : clé de chiffrement des secrets (32 octets en hexadécimal), et clé des sauvegardes.
+// À générer une fois par machine : php -r 'echo bin2hex(random_bytes(32)), "\n";'
+// Les changer rend illisibles les secrets enregistrés (chacun réactive sa double authentification) et les sauvegardes faites avant.
+$_CLE_TOTP = "";
+$_CLE_SAUVEGARDE = "";
+
+// Sauvegardes de la nuit (script-cgi/sauvegarder.php) : un dossier hors du web, accessible au seul utilisateur de la
+// tâche planifiée (chmod 700). Une copie hors de ce serveur est à organiser à part (deploiement/README.md).
+$_DOSSIER_SAUVEGARDES = "/var/backups/navup";

@@ -36,6 +36,8 @@ class Message
         // Interne : avis au responsable quand un parent prend, déplace ou annule en ligne. Il ne s'écrit ni dans le fil
         // du dossier ni dans la liste de ses e-mails (le fait lui-même y est déjà) ; son destinataire est un utilisateur.
         'rdv_avis' => array('libelle' => 'Avis au responsable', 'module' => 'rendez_vous', 'interne' => true),
+        // Interne (étape 8) : un parent a demandé, depuis son espace, la suppression de son compte. Aux administrateurs.
+        'rgpd_avis' => array('libelle' => "Demande d'effacement", 'module' => 'dossier', 'interne' => true),
     );
 
     // Modèles d'un rendez-vous qui doit encore tenir au moment de l'envoi, et ceux qui portent l'invitation de calendrier
@@ -274,6 +276,17 @@ class Message
                 }
                 if (!empty($d['fiche'])) {
                     $p[] = "Ouvrir la fiche : " . $d['fiche'];
+                }
+                break;
+
+            case 'rgpd_avis':
+                // Aux administrateurs : la référence du dossier, la date, où agir. Ni nom ni adresse du parent.
+                $signature = "La Tour de contrôle NavUp";
+                $sujet = "Demande d'effacement de données";
+                $p[] = "Un parent a demandé la suppression de son compte depuis son espace personnel (dossier " . $d['reference'] . ", le " . self::jourEcrit($d['date']) . "). Son espace est déjà fermé.";
+                $p[] = "Effacez le dossier depuis la page RGPD de la Tour de contrôle dans le mois qui suit la demande : c'est le délai légal.";
+                if (!empty($d['page'])) {
+                    $p[] = "Ouvrir la page RGPD : " . $d['page'];
                 }
                 break;
 

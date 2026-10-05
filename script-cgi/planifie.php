@@ -34,6 +34,7 @@ include_once __DIR__ . "/../include/package.formation.php";
 include __DIR__ . "/../include/package.automate.php";
 include __DIR__ . "/../include/package.stripe.php";
 include __DIR__ . "/../include/package.connexions.php";
+include __DIR__ . "/../include/package.rgpd.php";
 include __DIR__ . "/../require/param.php";
 
 /** « 1 audio converti », « 3 audios convertis » : le nombre et son nom, accordés. */
@@ -106,6 +107,40 @@ $PASSES = array(
         global $Rdv;
 
         return nb($Rdv->rappeler(), 'rappel de rendez-vous déposé', 'rappels de rendez-vous déposés');
+    },
+
+    // Avant « messages » : l'avis d'une demande d'effacement part dans le même passage ; la tâche s'ouvre à « taches »
+    'rgpd' => function () {
+        global $Mysql, $Message, $_URL_TOUR;
+
+        $signalees = 0;
+        $admins = $Mysql->fetchAll("SELECT id_users, prenom, email FROM u_users WHERE profil = 'admin' AND actif = 1");
+        foreach ($Mysql->fetchAll(
+            "SELECT d.id_demande, d.date_creation, a.id_contact FROM e_demande d INNER JOIN a_compte a ON a.id_compte = d.id_compte
+             WHERE d.date_signalement IS NULL AND d.date_traitement IS NULL ORDER BY d.id_demande"
+        ) as $d) {
+            foreach ($admins as $u) {
+                $destinataire = (object) array('id_contact' => (int) $d->id_contact, 'prenom' => $u->prenom, 'email' => $u->email);
+                $Message->deposer($destinataire, 'rgpd_avis', array(
+                    'reference' => Contact::reference($d->id_contact),
+                    'date' => substr($d->date_creation, 0, 10),
+                    'page' => (isset($_URL_TOUR) && $_URL_TOUR !== '') ? $_URL_TOUR . 'parametres/rgpd' : null,
+                ), 'rgpd:avis:' . (int) $d->id_demande . ':' . (int) $u->id_users, array('objet_type' => 'demande', 'objet_id' => (int) $d->id_demande));
+            }
+            $Mysql->execute(
+                "UPDATE e_demande SET date_signalement = NOW(), id_contact = ? WHERE id_demande = ?",
+                array((int) $d->id_contact, (int) $d->id_demande),
+                'ii'
+            );
+            $signalees++;
+        }
+
+        $Rgpd = new Rgpd();
+        $purge = $Rgpd->purger();
+
+        return nb($signalees, "demande d'effacement signalée", "demandes d'effacement signalées") . ", "
+            . nb($purge['u_audit'], "ligne du journal effacée", "lignes du journal effacées") . ", "
+            . nb($purge['m_message'], 'e-mail ancien effacé', 'e-mails anciens effacés');
     },
 
     'messages' => function () {

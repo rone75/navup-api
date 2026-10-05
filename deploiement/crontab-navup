@@ -1,0 +1,12 @@
+# Tâches planifiées de NavUp (modèle, étape 8), pour l'utilisateur « navup » : crontab -u navup crontab-navup
+# Heure de Paris. Les deux scripts consignent leur passage dans t_planifie (onglet Connexions de la Tour de contrôle).
+MAILTO=""
+
+# Toutes les 15 minutes : Stripe, comptes, médias, rappels, RGPD, e-mails, tâches, surveillance
+*/15 * * * * php /var/www/navup-api/script-cgi/planifie.php >> /var/log/navup/planifie.log 2>&1
+
+# Chaque nuit à 3 h 10 : sauvegarde chiffrée (base et médias), rotation 7 jours et 4 semaines
+10 3 * * * php /var/www/navup-api/script-cgi/sauvegarder.php >> /var/log/navup/sauvegarde.log 2>&1
+
+# Chaque premier dimanche du mois à 4 h : preuve que la dernière sauvegarde se relit (base de test navup_restauration)
+0 4 1-7 * 0 php /var/www/navup-api/script-cgi/restaurer.php --vers=navup_restauration >> /var/log/navup/restauration.log 2>&1

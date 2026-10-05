@@ -72,6 +72,8 @@ $dossiers = $Mysql->fetchAll("SELECT id_contact FROM d_contact WHERE email LIKE 
 foreach ($dossiers as $d) {
     $idc = (int) $d->id_contact;
     $nb_audit += $Mysql->execute("DELETE FROM u_audit WHERE cible_type = 'contact' AND cible_id = ?", array($idc), 'i');
+    // Demandes d'effacement déposées par l'appli des parents (étape 8) : elles survivraient au compte (SET NULL)
+    $Mysql->execute("DELETE d FROM e_demande d LEFT JOIN a_compte a ON a.id_compte = d.id_compte WHERE a.id_contact = ? OR d.id_contact = ?", array($idc, $idc), 'ii');
     // Les ventes ne partent pas en cascade avec un dossier : historique, écritures et échéances s'effacent d'abord
     foreach (array('s_prelevement', 's_session', 's_lien', 'v_historique', 'v_paiement', 'v_echeance') as $table) {
         $Mysql->execute("DELETE FROM $table WHERE id_vente IN (SELECT id_vente FROM v_vente WHERE id_contact = ?)", array($idc), 'i');
@@ -118,6 +120,19 @@ $nb_audit += $Mysql->execute("DELETE FROM u_audit WHERE user_agent LIKE ?", arra
 $nb_sessions = $Mysql->execute("DELETE FROM u_token WHERE user_agent LIKE ?", array('%HeadlessChrome%'), 's');
 
 $Mysql->execute("DELETE FROM u_login_ip WHERE ip IN (?, ?)", array('::1', '127.0.0.1'), 'ss');
+
+// Étape 7b : valeurs de listes ajoutées par les contrôles (libellé commençant par « Essai », jamais utilisées),
+// vues enregistrées, versions de modèles d'e-mails et réglages écrits par un compte d'essai (l'administrateur temporaire compris)
+foreach (array('p_origine' => 'd_contact WHERE code_origine', 'p_categorie_problematique' => 'd_problematique WHERE code_categorie', 'p_moyen_paiement' => 'v_paiement WHERE code_moyen') as $table => $usage) {
+    foreach ($Mysql->fetchAll("SELECT code FROM $table WHERE libelle LIKE 'Essai%'") as $v) {
+        if ((int) $Mysql->fetchOne("SELECT COUNT(*) AS n FROM $usage = ?", array($v->code), 's')->n === 0) {
+            $Mysql->execute("DELETE FROM $table WHERE code = ?", array($v->code), 's');
+        }
+    }
+}
+$Mysql->execute("DELETE v FROM u_vue v INNER JOIN u_users u ON u.id_users = v.id_users WHERE u.identifiant LIKE 'essai.%'");
+$Mysql->execute("DELETE m FROM m_modele m INNER JOIN u_users u ON u.id_users = m.id_users WHERE u.identifiant LIKE 'essai.%'");
+$Mysql->execute("DELETE r FROM p_reglage r INNER JOIN u_users u ON u.id_users = r.id_users WHERE u.identifiant LIKE 'essai.%'");
 
 echo count($comptes) . " compte(s), " . count($dossiers) . " dossier(s) et " . count($taches) . " tâche(s) sans dossier d'essai supprimé(s), $nb_audit ligne(s) d'audit, $nb_sessions session(s) du navigateur sans tête.\n";
 

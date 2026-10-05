@@ -1490,6 +1490,9 @@ class Tache
         'acces_fin_proche' => array('categorie' => 'suivi', 'nature' => 'tache', 'objet' => 'compte'),
         // Prendre des nouvelles d'un parent en programme : interne, une fois par programme, jamais montré au parent
         'programme_inactif' => array('categorie' => 'suivi', 'nature' => 'appel', 'objet' => 'compte'),
+        // Étape 8. Le parent a demandé la suppression de son compte (appli des parents) : effacer le dossier depuis la page
+        // RGPD. Toujours allumée (obligation légale, un mois au plus) : elle n'est pas dans les réglages.
+        'demande_effacement' => array('categorie' => 'gestion', 'nature' => 'tache', 'objet' => 'contact'),
     );
 
     /** Délai réglable (require/param.php, puis package.reglage.php), en jours. */
@@ -2101,6 +2104,15 @@ class Tache
                 $params[] = $jour;
                 $params[] = $jour;
                 $dossier = 'a.id_contact';
+                break;
+
+            case 'demande_effacement':
+                // Demande déposée depuis l'appli des parents, pas encore traitée ; due 14 jours après (le délai légal est d'un mois)
+                $sql = "SELECT COALESCE(a.id_contact, d.id_contact) AS objet_id, COALESCE(a.id_contact, d.id_contact) AS id_contact,
+                               DATE(d.date_creation) + INTERVAL 14 DAY AS date_echeance, NULL AS id_users
+                        FROM e_demande d LEFT JOIN a_compte a ON a.id_compte = d.id_compte
+                        WHERE d.date_traitement IS NULL AND COALESCE(a.id_contact, d.id_contact) IS NOT NULL";
+                $dossier = 'COALESCE(a.id_contact, d.id_contact)';
                 break;
 
             default:

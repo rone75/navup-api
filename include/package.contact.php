@@ -36,7 +36,7 @@ class Contact
     const COLONNES = "c.id_contact, c.prenom, c.nom, c.email, c.telephone, c.statut, c.date_statut, c.code_origine,
             o.libelle AS origine, c.origine_precision, c.date_premier_contact, c.date_inscription,
             " . self::SQL_PROCHAINE_ACTION . " AS date_prochaine_action,
-            c.date_derniere_interaction, c.date_archivage, c.date_creation, c.date_modif,
+            c.date_derniere_interaction, c.date_archivage, c.niveau_anonymisation, c.date_anonymisation, c.date_creation, c.date_modif,
             " . Compte::COLONNES_DOSSIER;
 
     const SQL_FROM = " FROM d_contact c LEFT JOIN p_origine o ON o.code = c.code_origine LEFT JOIN a_compte a ON a.id_contact = c.id_contact";
@@ -188,6 +188,9 @@ class Contact
             'date_archivage' => $row->date_archivage,
             'date_creation' => $row->date_creation,
             'date_modif' => $row->date_modif,
+            // RGPD : null, « familial » (famille, notes et échanges effacés) ou « complet » (identité effacée aussi)
+            'anonymisation' => isset($row->niveau_anonymisation) ? $row->niveau_anonymisation : null,
+            'date_anonymisation' => isset($row->date_anonymisation) ? $row->date_anonymisation : null,
             // Programme du compte NavUp Academy (état, semaine en cours) : calculé ici, le front l'affiche ; null sans compte
             'programme' => Compte::programmeDuDossier($row),
         );
@@ -316,7 +319,15 @@ class Contact
         global $SQL, $Mysql;
 
         $SQL->begin_transaction();
-        $Mysql->fetchOne("SELECT id_contact FROM d_contact WHERE id_contact = ? FOR UPDATE", array((int) $id_contact), 'i');
+        $c = $Mysql->fetchOne("SELECT id_contact, niveau_anonymisation FROM d_contact WHERE id_contact = ? FOR UPDATE", array((int) $id_contact), 'i');
+
+        // Dossier anonymisé (RGPD, étape 8) : plus aucune écriture depuis l'outil. Les automates (CLI) ne sont pas
+        // arrêtés : un écrit comptable tardif reste possible, sans donnée personnelle.
+        if ($c !== null && $c->niveau_anonymisation === 'complet' && PHP_SAPI !== 'cli') {
+            global $Response;
+            $SQL->rollback();
+            $Response->forbidden("Ce dossier a été anonymisé : il ne se modifie plus.");
+        }
     }
 
     /**

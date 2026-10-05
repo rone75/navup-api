@@ -25,7 +25,7 @@ class Modeles
     const CORPS_MAX = 6000;
 
     // Modèles que l'outil ne modifie pas : l'avis interne au responsable n'est pas adressé au parent
-    const FIGES = array('rdv_avis');
+    const FIGES = array('rdv_avis', 'rgpd_avis');
 
     /** Gabarits d'origine : le texte d'avant l'étape 7b, mot pour mot. */
     const ORIGINES = array(

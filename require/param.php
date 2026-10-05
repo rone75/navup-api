@@ -73,6 +73,15 @@ $_LIMITE_RDV = array(8, 60);               // réservations et gestes depuis une
 $_LIMITE_CRENEAUX = array(120, 15);        // lectures des créneaux depuis une adresse IP
 $_BILLET_MINUTES = 10;                     // durée d'un billet délivré par l'API des parents (rendez-vous de l'espace personnel)
 
+// RGPD (étape 8) : durées de conservation, réglables dans l'outil (package.reglage.php). L'outil propose, un administrateur
+// confirme chaque effacement (page RGPD) ; seuls le journal d'audit et les e-mails envoyés se purgent seuls (passe rgpd).
+$_RGPD_PROSPECT_ANS = 3;                   // prospect sans vente : effacement complet ce nombre d'années après le dernier fait
+$_RGPD_CLIENT_ANS = 3;                     // client : données familiales effacées ce nombre d'années après la fin de l'accès
+$_RGPD_COMPTABLE_ANS = 10;                 // client : identité effacée ce nombre d'années après la dernière écriture comptable
+$_RGPD_JOURNAL_MOIS = 12;                  // journal d'audit et e-mails envoyés : effacés au-delà de ce nombre de mois
+$_DONNEES_BILLET_MINUTES = 5;              // billet de l'appli des parents pour « Télécharger mes données »
+$_DOSSIER_SAUVEGARDES = '';                // dossier des sauvegardes de la nuit (script-cgi/sauvegarder.php) : à poser dans require/secret.php
+
 // E-mails aux parents
 $_MAIL_ESSAIS_MAX = 5;                    // au-delà, un envoi en erreur attend une relance manuelle
 

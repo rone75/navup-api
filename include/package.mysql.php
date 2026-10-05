@@ -27,6 +27,12 @@ class Mysql
 
         $base = isset($_DB['base']) ? $_DB['base'] : '';
 
+        // Contrôles d'une sauvegarde restaurée (script-cgi/restaurer.php) : en ligne de commande seulement, la variable
+        // NAVUP_BASE désigne la base de test. Jamais pour une requête web.
+        if (PHP_SAPI === 'cli' && is_string(getenv('NAVUP_BASE')) && preg_match('/^[a-z0-9_]{1,64}$/', getenv('NAVUP_BASE')) === 1) {
+            $base = getenv('NAVUP_BASE');
+        }
+
         $mysqli = @new mysqli(
             isset($_DB['hote']) ? $_DB['hote'] : 'localhost',
             isset($_DB['utilisateur']) ? $_DB['utilisateur'] : '',
@@ -44,6 +50,11 @@ class Mysql
         // Le décalage est calculé par PHP : les fuseaux nommés ne sont pas toujours chargés dans MySQL.
         $decalage = (new DateTime('now', new DateTimeZone('Europe/Paris')))->format('P');
         $mysqli->query("SET time_zone = '" . $decalage . "'");
+
+        // Réglages modifiés dans l'outil (étape 7b) : ils remplacent, dans les variables globales, les valeurs par défaut
+        // de require/param.php, que l'appelant a déjà incluses
+        require_once __DIR__ . '/package.reglage.php';
+        Reglage::appliquer($mysqli);
 
         return $mysqli;
     }

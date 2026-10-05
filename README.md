@@ -36,6 +36,9 @@ Prérequis : Apache + php-fpm (DocumentRoot `/var/www`, `AllowOverride All`), PH
    mariadb -unavup -p navup < /var/www/navup-parent-api/sql/100_espace.sql
    mariadb -unavup -p navup < sql/060_rdv_en_ligne.sql
    mariadb -unavup -p navup < /var/www/navup-parent-api/sql/110_billet.sql
+   mariadb -unavup -p navup < sql/070_parametres.sql
+   mariadb -unavup -p navup < sql/080_securite.sql
+   mariadb -unavup -p navup < /var/www/navup-parent-api/sql/120_demandes.sql
    ```
 
    Sur une base déjà en service (étape 3), `030_suivi.sql` convertit les « prochaines actions » des dossiers en tâches ; `031_prochaine_action.sql` retire ensuite leurs deux colonnes et ne s'applique qu'une fois l'API de l'étape 4 en place. Les deux fichiers se rejouent sans effet.
@@ -363,6 +366,32 @@ Le parent choisit lui-même un créneau : un visiteur sur la page publique (rend
 - Chaque export, rapport compris, est noté au journal d'audit (action `export`).
 - `php script-cgi/verifier-statistiques.php` recoupe les statistiques sur chaque période.
 
+## Endpoints de l'étape 7b : réglages, listes, modèles d'e-mails, vues
+
+| Endpoint | Rôle | Droit |
+|---|---|---|
+| `GET`, `PUT v1/parametres/reglages/` `{reglages: {cle: valeur \| null}}` | réglages modifiables (alertes, délais, accès, rendez-vous en ligne) ; null revient à la valeur par défaut de `param.php` ; tout ou rien | `parametres` complet |
+| `GET`, `POST`, `PUT v1/parametres/listes/` | origines, catégories, moyens de paiement (ajouter, renommer, ordonner, désactiver) ; offre (libellé, prix) | `parametres` complet |
+| `GET`, `POST`, `PUT v1/parametres/emails/` | modèles d'e-mails : liste, fiche (versions, marques), aperçu sur un parent fictif, nouvelle version, retour à une version ou au texte d'origine (0) | `parametres` complet |
+| `GET`, `POST`, `PUT`, `DELETE v1/vues/` | vues enregistrées de l'utilisateur connecté, par liste ; réglages validés par liste blanche, jamais la recherche | droit de lire la liste |
+
+Nouvelles alertes : prospect sans suivi, information manquante, fin d'accès proche, prendre des nouvelles (programme sans sujet terminé). Contrôles : `php script-cgi/verifier-emails.php`.
+
+## Endpoints de l'étape 8 : double authentification, RGPD
+
+| Endpoint | Rôle | Droit |
+|---|---|---|
+| `POST v1/user/` | avec la double authentification active : `{defi, minutes}` au lieu de `{token, user}` (défi de 5 minutes, empreinte seule gardée) | **public** |
+| `POST v1/user/totp/` `{defi, code}` | seconde étape : code de l'application (6 chiffres) ou code de secours ; un code faux compte comme un mot de passe faux (verrouillage) ; 5 codes faux ferment le défi ; un code déjà accepté est refusé | **public** |
+| `GET`, `POST v1/user/mfa/` `{action}` | « Mon compte » : état ; `commencer` (clé et adresse otpauth://) ; `confirmer {code}` (codes de secours rendus une fois) ; `secours` et `desactiver` `{pass, code}` | connecté |
+| `PUT v1/users/mfa/` `{id_users}` | retrait par un administrateur (téléphone perdu) : sessions fermées, au journal | `utilisateurs` complet |
+| `GET`, `POST v1/rgpd/` `{id_contact, niveau, reference}` | durées, demandes des parents, dossiers échus ; effacement familial ou complet, la référence retapée | `parametres` complet |
+| `POST v1/public/donnees/` `{billet}` | « Télécharger mes données » : le JSON du parent (`Rgpd::exporter`), sur un billet « donnees » de l'API des parents, valable une fois | billet |
+
+Effacement (`Rgpd::effacer`) : **familial** = déclarations, enfants, problématiques, notes, textes des rendez-vous et des échanges, tâches, e-mails, compte de l'appli et ses traces ; **complet** = de plus l'identité (dossier, commandes, réservations) et les identifiants Stripe. Ventes, échéances et paiements restent avec leurs montants. Purge automatique (passe `rgpd`) : journal d'audit et e-mails envoyés au-delà de `$_RGPD_JOURNAL_MOIS`.
+
+Sauvegardes : `php script-cgi/sauvegarder.php` (base + médias, archive chiffrée et manifeste scellé), `php script-cgi/restaurer.php --vers=navup_restauration` (recharge dans une base de test et y passe les contrôles). Contrôles : `verifier-totp.php`, `verifier-rgpd.php`, `verifier-production.php`. Mise en production : `deploiement/README.md`.
+
 ## Profils et droits
 
 Trois profils : `admin`, `accompagnement`, `gestion`. La matrice module par profil est `User::MATRICE` (`include/package.user.php`) ; le front en garde une copie (`core/rbac.ts`) pour l'affichage, l'API fait autorité. Le module `famille` couvre les données sensibles d'un dossier (informations familiales, problématiques, notes internes, motifs et comptes rendus des rendez-vous et des échanges, intitulé d'une tâche de suivi) : le profil `gestion` n'y accède jamais. Il lit l'agenda sans ses textes, n'a aucun accès aux appels, et ne voit que les tâches de gestion. Le module `formation` (étape 6a) : l'administrateur écrit, `accompagnement` lit, `gestion` n'y accède pas.
@@ -417,5 +446,5 @@ Le cahier des charges (§22) interdit les secrets dans le code et demande de lim
 - La tâche planifiée dans la crontab, le dossier des médias créé et sauvegardé avec la base.
 - Rendez-vous en ligne : l'adresse de l'appli des parents (`$_APP_PARENTS_URL`, pour le lien de gestion), `$_URL_TOUR` (lien de l'avis au responsable et du flux), des plages réglées par qui reçoit, et un essai réel de l'invitation dans Gmail, Apple Mail et Outlook. Le flux d'agenda porte son jeton dans son adresse : le format de journal sans chaîne de requête, ci-dessous, vaut aussi pour lui.
 - À faire valider avant l'ouverture, hors code : CGV et droit de rétractation pour un accès immédiat, textes des e-mails.
-- HTTPS obligatoire. La double authentification est prévue avant l'ouverture aux données réelles (étape 8 de la feuille de route).
+- HTTPS obligatoire. La marche à suivre complète (serveur, SELinux, vhosts, php-fpm, crontab, sauvegardes, SPF et DKIM) est dans `deploiement/README.md` ; `php script-cgi/verifier-production.php` dit ce qui manque.
 - Journal d'accès d'Apache : la recherche envoie le terme saisi (un nom, un téléphone) dans l'URL de l'API. Utiliser un format de journal sans la chaîne de requête, par exemple `LogFormat "%h %l %u %t \"%m %U %H\" %>s %b" navup` puis `CustomLog … navup` dans l'hôte virtuel de l'API (`%U` est le chemin seul, `%r` contiendrait les paramètres).

@@ -1,0 +1,13 @@
+# Journaux de NavUp (modèle, étape 8) : /etc/logrotate.d/navup. 12 semaines, comme le journal d'audit (12 mois au plus).
+/var/log/httpd/navup-*.log /var/log/navup/*.log /var/log/php-fpm/navup*-erreurs.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        /bin/systemctl reload httpd.service > /dev/null 2>&1 || true
+    endscript
+}

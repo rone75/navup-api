@@ -579,6 +579,8 @@ class User
             'profil' => $row->profil,
             'actif' => (int) $row->actif,
             'date_derniere_connexion' => $row->date_derniere_connexion,
+            // Double authentification activée (le secret ne sort jamais)
+            'mfa' => isset($row->totp_actif) && (int) $row->totp_actif === 1,
         );
     }
 
@@ -596,6 +598,7 @@ class User
         $out['date_verrouillage'] = $verrouille ? $row->date_verrouillage : null;
         $out['createur'] = isset($row->createur) ? $row->createur : null;
         $out['nb_sessions'] = isset($row->nb_sessions) ? (int) $row->nb_sessions : 0;
+        $out['mfa_date'] = $out['mfa'] ? $row->totp_date : null;
 
         return $out;
     }

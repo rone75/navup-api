@@ -47,7 +47,10 @@ class Connexions
                 'echec' => (int) $p->code !== 0 || ($p->date_fin === null && strtotime($p->date_debut) < time() - 1800),
                 'resume' => $p->resume,
             );
-            $dernier = $dernier === null ? $p->date_debut : max($dernier, $p->date_debut);
+            // La sauvegarde a sa propre cadence (chaque nuit) : elle ne dit pas si la tâche planifiée tourne
+            if ($p->passe !== 'sauvegarde') {
+                $dernier = $dernier === null ? $p->date_debut : max($dernier, $p->date_debut);
+            }
         }
 
         return array(
@@ -55,6 +58,14 @@ class Connexions
             'dernier' => $dernier,
             'retard' => $dernier === null || strtotime($dernier) < time() - self::RETARD_MINUTES * 60,
         );
+    }
+
+    /** La dernière sauvegarde réussie a-t-elle plus de 36 heures (ou n'y en a-t-il aucune) ? */
+    public static function sauvegardeEnRetard()
+    {
+        global $Mysql;
+        $r = $Mysql->fetchOne("SELECT date_fin, code FROM t_planifie WHERE passe = 'sauvegarde'");
+        return $r === null || $r->date_fin === null || (int) $r->code !== 0 || strtotime($r->date_fin) < time() - 36 * 3600;
     }
 
     /** Réservations faites depuis la page publique en 24 heures, et le plafond au-delà duquel elle ne propose plus rien. */
@@ -89,6 +100,10 @@ class Connexions
             }
         }
         if (!empty($_PROD) && $planifie['retard']) {
+            $n++;
+        }
+        // Sauvegarde de la nuit (étape 8) : en production, absente ou plus vieille que 36 heures
+        if (!empty($_PROD) && self::sauvegardeEnRetard()) {
             $n++;
         }
 

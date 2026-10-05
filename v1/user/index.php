@@ -5,6 +5,7 @@ include "../../include/package.mysql.php";
 include "../../include/package.data.php";
 include "../../include/package.response.php";
 include "../../include/package.user.php";
+include "../../include/package.totp.php";
 include "../../require/param.php";
 
 $H = new Header();
@@ -120,6 +121,14 @@ if ($_SERVER['REQUEST_METHOD'] === "POST") {
 
     if (password_needs_rehash($C->mdp, PASSWORD_BCRYPT)) {
         $Mysql->execute("UPDATE u_users SET mdp = ? WHERE id_users = ?", array(password_hash($pass, PASSWORD_BCRYPT), $id_users), 'si');
+    }
+
+    // Double authentification active : pas encore de session, un défi de 5 minutes pour le code. Le compteur d'échecs
+    // n'est pas remis à zéro : un code faux s'y ajoute, et le mot de passe juste ne l'efface pas (v1/user/totp/).
+    if ((int) $C->totp_actif === 1) {
+        $defi = Totp::creerDefi($id_users);
+        $U->audit($id_users, 'login_defi');
+        $Response->success(array('defi' => $defi, 'minutes' => Totp::DEFI_MINUTES));
     }
 
     $Mysql->execute(
